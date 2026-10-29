@@ -6,14 +6,14 @@ import threading
 
 from . import settings, web
 from .center import Center
-from .schedule import Scheduler
+from .schedule import Scheduler, ha_time_zone
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     log = logging.getLogger('iq_edge')
     center = Center()
-    scheduler = Scheduler(zone_name=lambda: center.time_zone)
+    scheduler = Scheduler(zone_name=lambda: center.time_zone or ha_time_zone())
     server = web.start(web.App(center))
     log.info('IQ Edge %s (%s): aba na porta %s; plataforma %s; %s.', settings.VERSION, settings.arch(), settings.ingress_port(),
              settings.center_url(), 'pareado' if center.paired() else 'aguardando o código de pareamento')

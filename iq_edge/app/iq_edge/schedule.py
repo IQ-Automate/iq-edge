@@ -13,6 +13,25 @@ LATE = timedelta(minutes=2)
 logger = logging.getLogger('iq_edge.schedule')
 
 
+_ZONE = {'name': '', 'at': 0.0}
+
+
+def ha_time_zone():
+    """The home's time zone from Home Assistant's /api/config (read again every hour; '' when it cannot be read): the schedule
+    speaks at the home's local time even before the add-on is paired (the heartbeat keeps it fresh afterwards)."""
+    import time
+    from . import relay
+    if time.monotonic() - _ZONE['at'] < 3600 and _ZONE['at']:
+        return _ZONE['name']
+    try:
+        status, config = relay.call_ha('GET', '/api/config')
+        name = str(config.get('time_zone') or '') if status == 200 and isinstance(config, dict) else ''
+    except relay.RelayError:
+        name = ''
+    _ZONE.update(name=name, at=time.monotonic())
+    return name
+
+
 def _zone(name):
     if not name:
         return None

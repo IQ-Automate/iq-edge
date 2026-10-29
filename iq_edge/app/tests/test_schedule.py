@@ -34,6 +34,15 @@ class TickTests(EdgeCase):
         self.assertEqual(len(spoken), 2)
         self.assertEqual(prefs.state()['last_spoken'], '2026-10-28 07:00')
 
+    def test_the_home_time_zone_comes_from_home_assistant(self):
+        schedule._ZONE.update(name='', at=0.0)
+        self.addCleanup(schedule._ZONE.update, name='', at=0.0)
+        self.assertEqual(schedule.ha_time_zone(), 'America/New_York')
+        runner = schedule.Scheduler(zone_name=schedule.ha_time_zone)
+        if schedule._zone('America/New_York'):  # the image has tzdata (apk); a machine without a time zone database uses local time
+            self.assertEqual(str(runner.now().tzinfo), 'America/New_York')
+        self.assertIsNotNone(runner.now().tzinfo)
+
 
 if __name__ == '__main__':
     unittest.main()
