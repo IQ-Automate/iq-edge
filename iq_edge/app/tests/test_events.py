@@ -132,7 +132,7 @@ class SpeakNowTests(EdgeCase):
             handle.assert_not_called()
             with mock.patch.dict(os.environ, {'IQ_BRIEFING_SATELLITE': 'assist_satellite.cozinha'}):
                 self.assertEqual(prefs.speak_now('en'), (True, 'One moment.'))
-            handle.assert_called_once_with('bom dia automatico', idioma_pedido='en')
+            handle.assert_called_once_with('bom dia automatico', idioma_pedido='en', pronto=None)
 
     def test_the_event_language_wins_over_the_saved_one(self):
         prefs.save_local(self.prefs(language='pt', speaker='', tts_engine=''))

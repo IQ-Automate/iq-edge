@@ -760,12 +760,43 @@ def _converter(valor: Any, origem: str, destino: str) -> Any:
     return n
 
 
+def _cartao_casa(dados: dict[str, Any], idioma: str) -> dict[str, Any]:
+    """O cartao "Casa": o que esta aberto (ou tudo fechado), o alarme e quem esta em casa."""
+    t = _T[idioma]
+    linhas_casa: list[str] = []
+    alerta = False
+    if dados.get("abertos"):
+        alerta = True
+        linhas_casa.extend(dados["abertos"][:4])
+    else:
+        linhas_casa.append(t["tudo_fechado"])
+    alarme = dados.get("alarme")
+    if alarme == "triggered":
+        alerta = True
+        linhas_casa.append(t["alarme"].format(estado=t["disparado"]))
+    elif alarme in _ALARMES_ARMADOS:
+        linhas_casa.append(t["alarme"].format(estado=t["armado"]))
+    elif alarme == "disarmed":
+        linhas_casa.append(t["alarme"].format(estado=t["desarmado"]))
+    if dados.get("pessoas"):
+        linhas_casa.append(t["em_casa"].format(nomes=", ".join(dados["pessoas"])))
+    return {
+        "icone": "mdi:door-open" if dados.get("abertos") else "mdi:home-lock",
+        "titulo": t["titulo_casa"],
+        "linhas": linhas_casa,
+        **({"tom": "alerta"} if alerta else {}),
+    }
+
+
 def build_cards(
     dados: dict[str, Any],
     previsao: dict[str, Any] | None,
     noticias: list[tuple[str, list[str]]],
     idioma: str,
+    *,
+    casa: bool | None = None,
 ) -> list[dict[str, Any]]:
+    """Clima, Casa (se o estado da casa entra; `casa=False` = o Bom dia preparado, que ganha o cartao na hora) e noticias."""
     t = _T[idioma]
     cartoes: list[dict[str, Any]] = []
 
@@ -792,32 +823,8 @@ def build_cards(
             linhas.append(t["chuva_card"].format(p=c["chuva"]))
         cartoes.append({"icone": c["icone"], "titulo": t["titulo_clima"], "linhas": linhas})
 
-    if _casa_ligada():
-        linhas_casa: list[str] = []
-        alerta = False
-        if dados.get("abertos"):
-            alerta = True
-            linhas_casa.extend(dados["abertos"][:4])
-        else:
-            linhas_casa.append(t["tudo_fechado"])
-        alarme = dados.get("alarme")
-        if alarme == "triggered":
-            alerta = True
-            linhas_casa.append(t["alarme"].format(estado=t["disparado"]))
-        elif alarme in _ALARMES_ARMADOS:
-            linhas_casa.append(t["alarme"].format(estado=t["armado"]))
-        elif alarme == "disarmed":
-            linhas_casa.append(t["alarme"].format(estado=t["desarmado"]))
-        if dados.get("pessoas"):
-            linhas_casa.append(t["em_casa"].format(nomes=", ".join(dados["pessoas"])))
-        cartoes.append(
-            {
-                "icone": "mdi:door-open" if dados.get("abertos") else "mdi:home-lock",
-                "titulo": t["titulo_casa"],
-                "linhas": linhas_casa,
-                **({"tom": "alerta"} if alerta else {}),
-            }
-        )
+    if _casa_ligada() if casa is None else casa:
+        cartoes.append(_cartao_casa(dados, idioma))
 
     for fonte, titulos in noticias:
         if titulos:
@@ -840,19 +847,47 @@ def _lista_nomes(nomes: list[str], idioma: str) -> str:
     return ", ".join(nomes[:-1]) + e + nomes[-1]
 
 
+def _saudacao(dados: dict[str, Any], idioma: str) -> str:
+    """ "Bom dia, Victtor e Matheus." (os nomes de quem esta em casa agora)."""
+    saudacao = _T[idioma]["bom_dia"]
+    if dados.get("pessoas"):
+        saudacao += ", " + _lista_nomes(dados["pessoas"], idioma)
+    return saudacao + "."
+
+
+def _frases_casa(dados: dict[str, Any], idioma: str) -> list[str]:
+    """As frases fixas do estado da casa: o que esta aberto (ou tudo fechado) e o alarme armado ou disparado."""
+    t = _T[idioma]
+    partes = [t["aberto"].format(itens=", ".join(dados["abertos"][:4]))] if dados.get("abertos") else [t["fechado"]]
+    if dados.get("alarme") == "triggered":
+        partes.append(t["alarme_disparado"])
+    elif dados.get("alarme") in _ALARMES_ARMADOS:
+        partes.append(t["alarme_armado"])
+    return partes
+
+
+def prefixo_da_hora(dados: dict[str, Any], idioma: str) -> str:
+    """O comeco da fala do Bom dia preparado, montado NA HORA de falar: cumprimento com quem esta em casa agora e, com o
+    estado da casa ligado, as frases fixas do que esta aberto e do alarme (nunca ficam velhos)."""
+    return " ".join([_saudacao(dados, idioma)] + (_frases_casa(dados, idioma) if _casa_ligada() else []))
+
+
+def juntar_fala(prefixo: str, corpo: str) -> str:
+    return " ".join(parte for parte in (prefixo.strip(), corpo.strip()) if parte)
+
+
 def build_spoken_fallback(
     dados: dict[str, Any],
     previsao: dict[str, Any] | None,
     noticias: list[tuple[str, list[str]]],
     idioma: str,
+    *,
+    preparo: bool = False,
 ) -> str:
-    """Texto falado montado por regra, usado sem IA ou quando ela falha."""
+    """Texto falado montado por regra, usado sem IA ou quando ela falha. `preparo`: so clima e noticias (o Bom dia
+    preparado ganha o cumprimento e a casa na hora de falar)."""
     t = _T[idioma]
-    partes = []
-    saudacao = t["bom_dia"]
-    if dados.get("pessoas"):
-        saudacao += ", " + _lista_nomes(dados["pessoas"], idioma)
-    partes.append(saudacao + ".")
+    partes = [] if preparo else [_saudacao(dados, idioma)]
 
     if dados.get("clima"):
         c = _clima_resumido(dados, previsao, idioma)
@@ -870,15 +905,8 @@ def build_spoken_fallback(
             frase += "; " + ", ".join(extras)
         partes.append(frase + ".")
 
-    if _casa_ligada():
-        if dados.get("abertos"):
-            partes.append(t["aberto"].format(itens=", ".join(dados["abertos"][:4])))
-        else:
-            partes.append(t["fechado"])
-        if dados.get("alarme") == "triggered":
-            partes.append(t["alarme_disparado"])
-        elif dados.get("alarme") in _ALARMES_ARMADOS:
-            partes.append(t["alarme_armado"])
+    if _casa_ligada() and not preparo:
+        partes.extend(_frases_casa(dados, idioma))
 
     for fonte, titulos in noticias:
         if titulos:
@@ -1020,12 +1048,15 @@ def pedido_ia(
     candidatas: list[tuple[str, list[str]]],
     idioma: str,
     limites: dict[str, int],
+    *,
+    preparo: bool = False,
 ) -> dict[str, Any]:
     """O corpo de POST briefing-compose (contrato v2, lote A5): so dados, nunca instrucao. Clima com as duas unidades quando
     houver; aberto e alarme so com o estado da casa ligado; manchetes candidatas por fonte (ate 20 fontes, 30 titulos de
     ate 300 caracteres) com o limite de cada uma; fonte sem titulo ou com limite 0 nao vai. Acima de ~60 KB, saem os
-    ultimos titulos das fontes mais longas (os indices continuam valendo: so o fim da lista sai)."""
-    casa = _casa_ligada()
+    ultimos titulos das fontes mais longas (os indices continuam valendo: so o fim da lista sai). `preparo` (o Bom dia
+    preparado antes): sem nomes e sem a casa, que entram na hora de falar."""
+    casa = _casa_ligada() and not preparo
     clima = None
     if dados.get("clima"):
         c = _clima_resumido(dados, previsao, idioma)
@@ -1046,7 +1077,7 @@ def pedido_ia(
         "rules": regras,
         "house_state": casa,
         "facts": {
-            "names": [str(n) for n in (dados.get("pessoas") or [])][:20],
+            "names": [] if preparo else [str(n) for n in (dados.get("pessoas") or [])][:20],
             "weather": clima,
             "open": [str(a) for a in (dados.get("abertos") or [])][:20] if casa else [],
             "alarm": _alarme_dito(dados.get("alarme"), idioma) if casa else None,
@@ -1065,6 +1096,15 @@ def pedido_ia(
     return pedido
 
 
+_SAUDACAO_NO_COMECO = re.compile(r"^\s*(?:bom dia|good morning)\b[\s,;:!.\-]*", re.IGNORECASE)
+
+
+def _sem_saudacao(texto: str) -> str:
+    """O texto da IA para o Bom dia preparado sem o "Bom dia" do comeco (o cumprimento com os nomes entra na hora)."""
+    resto = _SAUDACAO_NO_COMECO.sub("", texto, count=1).strip()
+    return resto[:1].upper() + resto[1:]
+
+
 def compose(
     dados: dict[str, Any],
     previsao: dict[str, Any] | None,
@@ -1072,19 +1112,23 @@ def compose(
     idioma: str,
     *,
     client: Any | None = None,
+    preparo: bool = False,
 ) -> tuple[str, list[tuple[str, list[str]]]]:
     """Devolve (fala, noticias escolhidas). Com o centro, a IA de la escolhe as importantes e
-    escreve a fala; sem ele (ou com qualquer erro), vale o filtro por regra e o texto por regra."""
+    escreve a fala; sem ele (ou com qualquer erro), vale o filtro por regra e o texto por regra.
+    `preparo`: a fala sem cumprimento e sem a casa (o Bom dia preparado; prefixo_da_hora completa na hora)."""
     limites = _limites_por_fonte([nome for nome, _ in candidatas])
     por_regra = [(nome, filtrar_por_regra(titulos)[: limites[nome]]) for nome, titulos in candidatas]
-    fallback = build_spoken_fallback(dados, previsao, por_regra, idioma)
+    fallback = build_spoken_fallback(dados, previsao, por_regra, idioma, preparo=preparo)
     ativo = client if client is not None else _ai_client()
     if ativo is None:
         return fallback, por_regra
     try:
-        pedido = pedido_ia(dados, previsao, candidatas, idioma, limites)
+        pedido = pedido_ia(dados, previsao, candidatas, idioma, limites, preparo=preparo)
         resposta = ativo.compose(pedido)
         texto = str(resposta.get("text") or "").strip() if isinstance(resposta, dict) else ""
+        if preparo:
+            texto = _sem_saudacao(texto)
         if not texto:
             logger.warning("Bom dia: o centro respondeu sem texto; usando o texto por regra.")
             return fallback, por_regra
@@ -1356,6 +1400,16 @@ def _entregar_no_alto_falante(
             logger.warning("Resumo: erro na reserva do satelite.", exc_info=True)
 
 
+def _dados_da_casa(estados: list[dict[str, Any]]) -> dict[str, Any]:
+    ignorar = {x.strip().lower() for x in os.getenv("IQ_BRIEFING_IGNORAR", "").split(",") if x.strip()}
+    return collect_house(
+        estados,
+        os.getenv("IQ_BRIEFING_WEATHER_ENTITY") or None,
+        ignorar or None,
+        os.getenv("IQ_BRIEFING_TEMP_SENSOR", "").strip() or None,
+    )
+
+
 def _compor(
     idioma: str,
     estados_fn: Callable[[], list[dict[str, Any]]],
@@ -1363,8 +1417,11 @@ def _compor(
     fetch_feed_fn: Callable[[str, int], list[str]] | None,
     client: Any | None,
     feeds: list[tuple[str, str]] | None,
+    *,
+    preparo: bool = False,
 ) -> tuple[str, list[tuple[str, list[str]]], dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]] | None:
-    """Coleta (estados, previsao, RSS) e escreve a fala; None se o HA nao respondeu. Usado pelo bom dia e pelo "Testar"."""
+    """Coleta (estados, previsao, RSS) e escreve a fala; None se o HA nao respondeu. Usado pelo bom dia, pelo "Testar" e
+    pelo Bom dia preparado (`preparo`)."""
     previsao_fn = fetch_forecast_fn or fetch_forecast
     feed_fn = fetch_feed_fn or (lambda url, n: fetch_feed(url, n))
     fontes = feeds if feeds is not None else configured_feeds()
@@ -1378,13 +1435,7 @@ def _compor(
     if not estados:
         return None
 
-    ignorar = {x.strip().lower() for x in os.getenv("IQ_BRIEFING_IGNORAR", "").split(",") if x.strip()}
-    dados = collect_house(
-        estados,
-        os.getenv("IQ_BRIEFING_WEATHER_ENTITY") or None,
-        ignorar or None,
-        os.getenv("IQ_BRIEFING_TEMP_SENSOR", "").strip() or None,
-    )
+    dados = _dados_da_casa(estados)
     if not _clima_ligado():  # lote H2: "Falar o clima" desligado (nem fala, nem cartao, nem previsao)
         dados["clima"] = None
         dados["entidade_clima"] = None
@@ -1406,8 +1457,78 @@ def _compor(
             acumulado = candidatas.setdefault(nome, [])
             acumulado.extend(t for t in titulos if t not in acumulado)
 
-    fala, noticias = compose(dados, previsao, list(candidatas.items()), idioma, client=client)
+    fala, noticias = compose(dados, previsao, list(candidatas.items()), idioma, client=client, preparo=preparo)
     return fala, noticias, dados, previsao, estados
+
+
+# --------------------------------------------------------------------------
+# Bom dia preparado antes (lote A5, ready.py guarda; schedule.Preparer decide quando)
+# --------------------------------------------------------------------------
+
+
+def idioma_automatico() -> str:
+    """O idioma da fala automatica: o salvo (aba ou centro), ou portugues."""
+    return _pref("language") if _pref("language") in _T else "pt"
+
+
+def chave_preparo(idioma: str) -> str:
+    """O que, se mudar, invalida o Bom dia preparado: as preferencias (menos o horario), as opcoes IQ_BRIEFING_* e o idioma."""
+    import hashlib
+
+    prefs = {k: v for k, v in (ler_prefs() or {}).items() if k != "schedule"}
+    env = {k: v for k, v in os.environ.items() if k.startswith("IQ_BRIEFING_") and not k.startswith("IQ_BRIEFING_PREPARE")}
+    bruto = json.dumps({"prefs": prefs, "env": env, "language": idioma}, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(bruto.encode()).hexdigest()[:32]
+
+
+def preparar(
+    idioma: str,
+    *,
+    fetch_states_fn: Callable[[], list[dict[str, Any]]] | None = None,
+    fetch_forecast_fn: Callable[[str], dict[str, Any] | None] | None = None,
+    fetch_feed_fn: Callable[[str, int], list[str]] | None = None,
+    client: Any | None = None,
+) -> tuple[dict[str, Any], str] | None:
+    """O Bom dia preparado: (pronto, prefixo agora). `pronto` = {text, cards, weather_card, language, key} sem cumprimento,
+    sem nomes e sem a casa (o texto pela IA do centro, ou por regra); `prefixo` e o comeco que a fala teria AGORA (so para
+    adiantar o audio; nao e guardado). None se o HA nao respondeu."""
+    composto = _compor(idioma, fetch_states_fn or fetch_states, fetch_forecast_fn, fetch_feed_fn, client, None, preparo=True)
+    if composto is None:
+        return None
+    corpo, noticias, dados, previsao, _ = composto
+    pronto = {
+        "text": corpo,
+        "cards": build_cards(dados, previsao, noticias, idioma, casa=False),
+        "weather_card": bool(dados.get("clima")),
+        "language": idioma,
+        "key": chave_preparo(idioma),
+    }
+    return pronto, prefixo_da_hora(dados, idioma)
+
+
+def precache_tts(fala: str, idioma: str, cfg: dict[str, Any]) -> bool:
+    """Melhor esforco: pede ao HA para gerar e guardar em cache o audio desta fala (POST /api/tts_get_url com o mesmo motor,
+    mensagem, idioma e voz de speak_on_speaker) e baixa o audio uma vez, para o tts.speak da hora sair do cache. Nada toca
+    agora. Endpoint ausente ou erro: ignorado (a voz e gerada na hora, como antes)."""
+    if not HA_URL or not HA_TOKEN or not fala:
+        return False
+    corpo: dict[str, Any] = {"engine_id": cfg["engine"], "message": fala, "language": idioma}
+    voz = cfg["voz_en"] if idioma == "en" else cfg["voz_pt"]
+    if voz:
+        corpo["options"] = {"voice": voz}
+    try:
+        resposta = requests.post(f"{HA_URL}/api/tts_get_url", headers=_ha_headers(), json=corpo, timeout=60)
+        resposta.raise_for_status()
+        caminho = str((resposta.json() or {}).get("path") or "")
+        if caminho.startswith("/api/tts_proxy/"):
+            with requests.get(f"{HA_URL}{caminho}", headers=_ha_headers(), timeout=60, stream=True) as audio:
+                audio.raise_for_status()
+                for _ in audio.iter_content(65536):
+                    pass
+        return True
+    except (requests.RequestException, ValueError, AttributeError):
+        logger.info("Bom dia: o Home Assistant nao adiantou o audio da voz (ele sera gerado na hora).")
+        return False
 
 
 def preview(
@@ -1451,10 +1572,13 @@ def handle(
     set_volume_fn: Callable[[str, float], bool] | None = None,
     wait_fn: Callable[[str, float], None] | None = None,
     idioma_pedido: str | None = None,
+    pronto: dict[str, Any] | None = None,
 ) -> str | None:
     """Se `texto` pede o resumo, devolve a fala (e publica os cartoes no
     painel). Se nao pede, devolve None e quem chamou segue o fluxo normal.
-    `idioma_pedido` ("pt"/"en", ex.: o `language` do evento iq_bom_dia) vale no lugar do idioma salvo."""
+    `idioma_pedido` ("pt"/"en", ex.: o `language` do evento iq_bom_dia) vale no lugar do idioma salvo.
+    `pronto` (o Bom dia preparado, ready.fresh): no pedido automatico, a fala e o prefixo da hora (cumprimento e casa
+    com os estados de agora) + o texto pronto, sem RSS nem IA; idioma diferente = compoe na hora."""
     idioma = detect_briefing(texto)
     if idioma is None:
         return None
@@ -1467,11 +1591,26 @@ def handle(
     publicar = publish_fn or publish_cards
     duracao = max(10, min(300, int(os.getenv("IQ_BRIEFING_CARD_SECONDS", "40") or 40)))
 
-    composto = _compor(idioma, estados_fn, fetch_forecast_fn, fetch_feed_fn, client, feeds)
-    if composto is None:
-        return _T[idioma]["falha_casa"]
-    fala, noticias, dados, previsao, estados = composto
-    cartoes = build_cards(dados, previsao, noticias, idioma)
+    automatico = "automatico" in _normalizar(texto).split()
+    if automatico and isinstance(pronto, dict) and pronto.get("language") == idioma and isinstance(pronto.get("text"), str):
+        try:
+            estados = estados_fn()
+        except Exception:
+            logger.warning("Resumo: nao consegui ler os estados do HA.", exc_info=True)
+            estados = []
+        if not estados:
+            return _T[idioma]["falha_casa"]
+        dados = _dados_da_casa(estados)
+        fala = juntar_fala(prefixo_da_hora(dados, idioma), pronto["text"])
+        cartoes = [dict(c) for c in pronto.get("cards") or [] if isinstance(c, dict)]
+        if _casa_ligada():
+            cartoes.insert(1 if pronto.get("weather_card") and cartoes else 0, _cartao_casa(dados, idioma))
+    else:
+        composto = _compor(idioma, estados_fn, fetch_forecast_fn, fetch_feed_fn, client, feeds)
+        if composto is None:
+            return _T[idioma]["falha_casa"]
+        fala, noticias, dados, previsao, estados = composto
+        cartoes = build_cards(dados, previsao, noticias, idioma)
     try:
         publicar(cartoes, duracao)
     except Exception:
@@ -1480,7 +1619,6 @@ def handle(
     # Voz premium num alto-falante: o aparelho de voz so responde "Um instante."
     # e o resumo inteiro sai no alto-falante escolhido.
     cfg = speaker_config()
-    automatico = "automatico" in _normalizar(texto).split()
     sono = sleep_fn or time.sleep
     if cfg is not None:
         # estado do alto-falante NA HORA de falar (o resumo leva alguns segundos para

@@ -7,7 +7,7 @@ import threading
 from . import briefing, settings, web
 from .center import Center
 from .events import Listener
-from .schedule import Scheduler, ha_time_zone
+from .schedule import Preparer, Scheduler, ha_time_zone
 
 
 def main():
@@ -15,7 +15,7 @@ def main():
     log = logging.getLogger('iq_edge')
     center = Center()
     briefing.usar_centro(center)  # the Bom dia's text by the center's AI (lote A5); the rule text when not paired
-    scheduler = Scheduler(zone_name=lambda: center.time_zone or ha_time_zone())
+    scheduler = Scheduler(zone_name=lambda: center.time_zone or ha_time_zone(), preparer=Preparer())  # + the Bom dia prepared ahead
     listener = Listener() if settings.ha_token() else None  # outside Home Assistant (no token) there is no event to hear
     server = web.start(web.App(center, listener))
     log.info('IQ Edge %s (%s): aba na porta %s; plataforma %s; %s.', settings.VERSION, settings.arch(), settings.ingress_port(),
