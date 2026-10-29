@@ -27,7 +27,7 @@ você edita.
    - Ou em **Configuração** do add-on, no campo **Código de pareamento**. Salve e reinicie o add-on.
 3. Confira que a aba **Estado** mostra **Pareado** e o nome da casa.
 
-O código vale uma vez. Depois de 5 tentativas erradas ele deixa de valer: peça outro. Depois do pareamento o add-on apaga o código
+O código vale uma vez e por 15 minutos; vencido, usado ou cancelado na plataforma, peça outro. Depois do pareamento o add-on apaga o código
 das opções. Ele guarda a credencial própria em `/data` (só o add-on lê) e troca a credencial a cada 30 dias.
 
 ### Desparear
