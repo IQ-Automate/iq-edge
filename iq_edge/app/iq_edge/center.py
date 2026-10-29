@@ -1,6 +1,7 @@
 """The add-on's side of contract v2 with the IQ platform (the center's docs/EDGE_CONTRACT.md): pairing with the 6-digit code, the
 long-poll for jobs (HTTPS going OUT of the home; nothing comes in), running each job, the heartbeat every 5 min, the credential's
-rotation every 30 days, unpairing and the client's Bom dia sent to the center.
+rotation every 30 days, unpairing, the client's Bom dia sent to the center and the Bom dia's text written by the center's AI
+(briefing-compose, lote A5: only data goes, the key and the prompt stay in the center).
 
 The credential (32 random bytes from the center, delivered once) lives only in /data/edge.json (mode 600) and in the Authorization
 header of each call; never in a log, the tab or an answer. A code the center refused is never sent again by itself (it would spend
@@ -23,6 +24,8 @@ HEARTBEAT_EVERY = 300
 ROTATE_EVERY = 30 * 24 * 3600
 BACKOFF = (1, 2, 4, 8, 15, 30, 60)
 MAX_RESULT = 5 * 1024 * 1024
+COMPOSE_TIMEOUT = 45
+COMPOSE_ERRORS = {401: 'revoked', 410: 'home_deleted', 413: 'too_big', 422: 'invalid', 429: 'rate', 502: 'ai_failed', 503: 'no_key'}
 logger = logging.getLogger('iq_edge.center')
 
 
@@ -34,6 +37,15 @@ class CenterError(Exception):
     def __init__(self, status, code=''):
         self.status, self.code = status, code
         super().__init__(f'HTTP {status} {code}'.strip())
+
+
+class NoAI(Exception):
+    """The center did not write the Bom dia (not paired, offline, no key, limit, the model failed...): the home speaks the rule text.
+    `reason` is a short code, never data."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
 
 
 def _now_iso():
@@ -65,6 +77,10 @@ class Center:
         self.failures = 0
         self.retry_after = 0.0
         self.time_zone = ''
+        self.ai_session = requests.Session()  # the Bom dia asks from other threads while the loop holds a long-poll
+        self.ai_session.trust_env = False
+        self.ai = {'ok': None, 'at': None, 'reason': ''}  # the last briefing-compose (the tab shows it)
+        self._local = threading.local()  # a preview job's deadline (the center gives up on it after that)
 
     # ---- the credential file ----
 
@@ -83,8 +99,9 @@ class Center:
         data = self.credential()
         with self.lock:
             out = dict(self.status)
+            ai = dict(self.ai)
         out.update(paired=bool(data), home_name=data.get('home_name', ''), paired_at=data.get('paired_at'), center=settings.center_url(),
-                   version=settings.VERSION, arch=settings.arch())
+                   version=settings.VERSION, arch=settings.arch(), ai_ok=ai['ok'], ai_at=ai['at'])
         if data and out['state'] in ('unpaired', 'code_refused'):
             out['state'] = 'paired'
         return out
@@ -102,7 +119,7 @@ class Center:
 
     # ---- HTTP to the center ----
 
-    def _request(self, method, route, body=None, timeout=20, credential=None, auth=True):
+    def _request(self, method, route, body=None, timeout=20, credential=None, auth=True, session=None):
         """(status, data, headers). Revoked on 401 of an authenticated call; requests' errors go up (the loop backs off)."""
         headers = {'X-IQ-Edge-Contract': CONTRACT, 'Accept': 'application/json'}
         if auth:
@@ -110,8 +127,8 @@ class Center:
             if not data:
                 raise Revoked()
             headers.update({'Authorization': 'Bearer ' + (credential or data['credential']), 'X-IQ-Edge-Home': data['home_id']})
-        answer = self.session.request(method, settings.center_url() + '/api/edge/v1/' + route, json=body, headers=headers,
-                                      timeout=timeout, allow_redirects=False)
+        answer = (session or self.session).request(method, settings.center_url() + '/api/edge/v1/' + route, json=body, headers=headers,
+                                                   timeout=timeout, allow_redirects=False)
         try:
             data = answer.json() if answer.content else None
         except ValueError:
@@ -161,8 +178,8 @@ class Center:
         token = settings.ha_token()
         if not token:
             return
-        options = settings.options()
-        body = {'options': {'center_url': str(options.get('center_url') or settings.DEFAULT_CENTER), 'pairing_code': ''}}
+        options = settings.options()  # the Supervisor replaces ALL the options: the others (Bom dia's) go back as they are
+        body = {'options': dict(options, center_url=str(options.get('center_url') or settings.DEFAULT_CENTER), pairing_code='')}
         try:
             self.session.post(settings.supervisor_url() + '/addons/self/options', json=body, timeout=10, allow_redirects=False,
                               headers={'Authorization': 'Bearer ' + token})
@@ -202,10 +219,13 @@ class Center:
             except OSError:
                 return {'ok': False, 'error': 'error', 'detail': 'could not write the preferences file'}
         if kind == 'preview':
+            self._local.deadline = deadline  # the AI's answer must come before the center gives up on the job
             try:
                 return {'ok': True, 'status': 200, 'data': prefs.preview((request or {}).get('prefs'), (request or {}).get('language'))}
             except ValueError as error:
                 return {'ok': False, 'error': 'refused', 'detail': f'invalid: {error}'}
+            finally:
+                self._local.deadline = None
         if kind == 'ping':
             return {'ok': True, 'status': 200, 'data': {'pong': True, 'addon_version': settings.VERSION}}
         return {'ok': False, 'error': 'invalid', 'detail': 'kind'}
@@ -219,6 +239,40 @@ class Center:
         status, _, _ = self._request('POST', f'jobs/{job["id"]}/result', result, timeout=30)
         if status not in (200, 409):
             raise CenterError(status)
+
+    # ---- the Bom dia's text by the center's AI (briefing-compose) ----
+
+    def compose(self, payload):
+        """POST briefing-compose (contract v2, lote A5) → {"text", "picks", "model", "words"}. One try, 45 s at most (less inside a
+        preview job, so the answer beats the job's deadline). Any failure → NoAI(reason); the body (names, headlines) is never logged.
+        401/410 are not handled here (the loop forgets a revoked credential, as for the other calls): here they only mean "no AI"."""
+        if not self.paired():
+            raise NoAI('unpaired')
+        timeout = COMPOSE_TIMEOUT
+        deadline = getattr(self._local, 'deadline', None)
+        if deadline:
+            left = (deadline - datetime.now(timezone.utc)).total_seconds() - 5
+            if left < 3:
+                raise NoAI('deadline')
+            timeout = min(timeout, left)
+        try:
+            status, data, _ = self._request('POST', 'briefing-compose', payload, timeout=timeout, session=self.ai_session)
+        except Revoked:
+            status, data = 401, None
+        except requests.Timeout:
+            status, data = 'timeout', None
+        except requests.RequestException:
+            status, data = 'offline', None
+        if status == 200 and isinstance(data, dict) and isinstance(data.get('text'), str) and data['text'].strip():
+            self._ai_status(True)
+            return data
+        reason = 'bad_response' if status == 200 else status if isinstance(status, str) else COMPOSE_ERRORS.get(status, f'http_{status}')
+        self._ai_status(False, reason)
+        raise NoAI(reason)
+
+    def _ai_status(self, ok, reason=''):
+        with self.lock:
+            self.ai = {'ok': ok, 'at': _now_iso(), 'reason': reason}
 
     # ---- heartbeat, rotation, the client's Bom dia, unpair ----
 

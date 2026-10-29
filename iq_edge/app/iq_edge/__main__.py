@@ -4,7 +4,7 @@ import logging
 import signal
 import threading
 
-from . import settings, web
+from . import briefing, settings, web
 from .center import Center
 from .schedule import Scheduler, ha_time_zone
 
@@ -13,6 +13,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     log = logging.getLogger('iq_edge')
     center = Center()
+    briefing.usar_centro(center)  # the Bom dia's text by the center's AI (lote A5); the rule text when not paired
     scheduler = Scheduler(zone_name=lambda: center.time_zone or ha_time_zone())
     server = web.start(web.App(center))
     log.info('IQ Edge %s (%s): aba na porta %s; plataforma %s; %s.', settings.VERSION, settings.arch(), settings.ingress_port(),

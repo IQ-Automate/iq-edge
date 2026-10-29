@@ -121,6 +121,9 @@ class FakeCenter(_Server):
         self.code, self.credential, self.previous, self.home_id = code, None, None, 'home-1'
         self.jobs, self.results, self.heartbeats, self.prefs, self.log = [], {}, [], [], []
         self.revoked, self.next_version = False, 7
+        # briefing-compose (lote A5): (status, JSON answer or raw bytes, extra headers); every call kept with its headers
+        self.compose_answer = (503, {'error': 'no_key', 'message': 'no key'}, {})
+        self.composed = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -179,6 +182,18 @@ class FakeCenter(_Server):
                 if path == 'unpair':
                     fake.revoked = True
                     return self.answer(200, {'ok': True})
+                if method == 'POST' and path == 'briefing-compose':
+                    fake.composed.append({'body': data, 'headers': dict(self.headers), 'size': len(body)})
+                    status, answer, extra = fake.compose_answer
+                    raw = answer if isinstance(answer, bytes) else json.dumps(answer).encode()
+                    self.send_response(status)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(raw)))
+                    for name, value in extra.items():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return None
                 return self.answer(404, {'error': 'route'})
 
             def do_GET(self):
