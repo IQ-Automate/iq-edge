@@ -12,11 +12,16 @@ Outside Home Assistant (tests, a developer's machine) the same code runs with en
   IQ_PAIRING_CODE             instead of the option pairing_code
   IQ_SUPERVISOR_URL           instead of http://supervisor (only used to clear the code from the options after pairing)
   IQ_INGRESS_PORT, IQ_INGRESS_PEERS   the tab's port (8099) and who may open it (only 172.30.32.2, the Supervisor; tests only)
-Nothing here is ever logged."""
+  IQ_HA_WS_URL                instead of ws://supervisor/core/websocket (Home Assistant's event iq_bom_dia, events.py)
+Nothing here is ever logged.
+
+The Bom dia's options (lote A5, all optional in config.yaml) become, at start, the IQ_BRIEFING_* variables briefing.py and
+schedule.py read (BRIEFING_OPTIONS); an option left empty sets nothing (the code's default)."""
 import json
 import os
 import platform
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -49,8 +54,27 @@ def data_dir():
     return Path(os.getenv('IQ_DATA_DIR') or '/data')
 
 
+def parse_time(value):
+    """An ISO moment as an aware datetime (UTC when it carries no zone); None when it cannot be read."""
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def file_options():
+    """/data/options.json exactly as the Supervisor wrote it; None when it cannot be read (then nothing may be written back:
+    the Supervisor replaces all the options at once)."""
+    try:
+        data = json.loads((data_dir() / 'options.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def options():
-    """The add-on's options (center_url, pairing_code); the environment wins (tests)."""
+    """The add-on's options (center_url, pairing_code, the Bom dia's); the environment wins (tests)."""
     try:
         data = json.loads((data_dir() / 'options.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
@@ -61,6 +85,35 @@ def options():
     if os.getenv('IQ_PAIRING_CODE') is not None:
         data['pairing_code'] = os.getenv('IQ_PAIRING_CODE')
     return data
+
+
+BRIEFING_OPTIONS = {
+    'weather_entity': 'IQ_BRIEFING_WEATHER_ENTITY',
+    'temp_sensor': 'IQ_BRIEFING_TEMP_SENSOR',
+    'satellite': 'IQ_BRIEFING_SATELLITE',
+    'tts_voice': 'IQ_BRIEFING_TTS_VOICE',
+    'tts_voice_en': 'IQ_BRIEFING_TTS_VOICE_EN',
+    'speaker_delay': 'IQ_BRIEFING_SPEAKER_DELAY',
+    'speaker_wait': 'IQ_BRIEFING_SPEAKER_WAIT',
+    'speaker_busy': 'IQ_BRIEFING_SPEAKER_BUSY',
+    'card_seconds': 'IQ_BRIEFING_CARD_SECONDS',
+    'prepare_minutes': 'IQ_BRIEFING_PREPARE_MINUTES',
+    'prepare_at': 'IQ_BRIEFING_PREPARE_AT',
+}
+
+
+def apply_briefing_options():
+    """At start: each Bom dia option that is set becomes its IQ_BRIEFING_* variable. Returns the option names applied (for the log;
+    never the values)."""
+    data = options()
+    applied = []
+    for option, variable in BRIEFING_OPTIONS.items():
+        value = data.get(option)
+        if value is None or isinstance(value, (dict, list)) or not str(value).strip():
+            continue
+        os.environ[variable] = str(value).strip()[:200]
+        applied.append(option)
+    return applied
 
 
 def center_url():

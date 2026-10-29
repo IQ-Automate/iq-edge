@@ -5,3 +5,36 @@ configuration:
   pairing_code:
     name: Pairing code
     description: The 6 digits IQ generated for this home on the platform (valid for 15 minutes). It is cleared after pairing.
+  weather_entity:
+    name: Good morning — weather entity
+    description: The weather.* entity for the forecast. Empty = the first one in the home.
+  temp_sensor:
+    name: Good morning — temperature sensor
+    description: A sensor.* (for example, the one outside) that gives the current temperature. High and low still come from the forecast.
+  satellite:
+    name: Good morning — reserve voice device
+    description: An assist_satellite.* that speaks the good morning when the speaker or its voice fails, or when there is no speaker.
+  tts_voice:
+    name: Good morning — voice (Portuguese)
+    description: The voice id of the voice engine (for example, ElevenLabs). Also used in English when the English one is empty.
+  tts_voice_en:
+    name: Good morning — voice (English)
+    description: The voice id for English.
+  speaker_delay:
+    name: Good morning — wait before speaking (s)
+    description: Seconds before playing on the speaker (default 2). The automatic speech does not wait.
+  speaker_wait:
+    name: Good morning — wait for the speaker (s)
+    description: Seconds to wait for an unavailable speaker to come back (default 8).
+  speaker_busy:
+    name: Good morning — speaker playing
+    description: "voice: speak on the reserve voice device without interrupting (default). interrupt: speak over the TV or music."
+  card_seconds:
+    name: Good morning — cards on the panel (s)
+    description: How long the cards stay on the panel (default 40).
+  prepare_minutes:
+    name: Good morning — prepare ahead (min)
+    description: Minutes before the chosen time to prepare the good morning, so it is spoken at once (default 30; 0 = off).
+  prepare_at:
+    name: Good morning — prepare at (HH:MM)
+    description: For a home without a chosen time that uses the iq_bom_dia event, the time to start preparing (default 06:00).

@@ -8,7 +8,7 @@ from http.client import HTTPConnection
 from unittest import mock
 from urllib.parse import urlencode
 
-from iq_edge import prefs, web
+from iq_edge import prefs, ready, web
 from iq_edge.center import Center
 from tests.fakes import EdgeCase
 
@@ -89,6 +89,29 @@ class StatusTests(WebCase):
         self.assertIn('Despareado. Para desfazer', html)
         self.assertFalse(self.edge.paired())
         self.assertEqual(self.center.log[-1][2], {'user': {'name': 'Franco <C>'}})
+
+    def test_the_bom_dia_lines_ai_by_the_center_prepared_and_the_event(self):
+        self.edge.pair('123456')
+        html = self.call('GET', '/')[1]
+        self.assertIn('<dt>IA pelo centro</dt><dd>ainda não usada</dd>', html)
+        self.assertIn('<dt>Bom dia</dt><dd>ainda não preparado</dd>', html)
+        self.assertNotIn('Evento iq_bom_dia', html)  # outside Home Assistant there is no listener
+        from iq_edge import briefing
+        briefing.usar_centro(self.edge)
+        self.addCleanup(briefing.usar_centro, None)
+        prefs.save_local(self.prefs())
+        ready.prepare('pt')  # the fake center answers 503 (no key): the rule text, and "no answer" on the tab
+        self.app.listener = mock.Mock(public=lambda: {'state': 'listening'})
+        html = self.call('GET', '/')[1]
+        self.assertRegex(html, r'<dt>IA pelo centro</dt><dd>sem resposta \(última vez \d\d:\d\d\)</dd>')
+        self.assertRegex(html, r'<dt>Bom dia</dt><dd>preparado às \d\d:\d\d</dd>')
+        self.assertIn('<dt>Evento iq_bom_dia</dt><dd>ouvindo</dd>', html)
+        self.center.compose_answer = (200, {'text': 'Bom dia!', 'picks': []}, {})
+        prefs.preview(self.prefs())
+        self.app.listener = mock.Mock(public=lambda: {'state': 'auth_failed'})
+        html = self.call('GET', '/', headers={'Accept-Language': 'en'})[1]
+        self.assertRegex(html, r'<dt>AI by the platform</dt><dd>ok \(last time \d\d:\d\d\)</dd>')
+        self.assertIn('<dd>Home Assistant refused the access</dd>', html)
 
 
 class BriefingTests(WebCase):

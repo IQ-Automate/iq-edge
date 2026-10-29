@@ -5,3 +5,36 @@ configuration:
   pairing_code:
     name: Código de pareamento
     description: Os 6 dígitos que a IQ gerou para esta casa na plataforma (vale 15 minutos). Some depois de parear.
+  weather_entity:
+    name: Bom dia — entidade do clima
+    description: A entidade weather.* da previsão. Vazio = a primeira da casa.
+  temp_sensor:
+    name: Bom dia — sensor de temperatura
+    description: Um sensor.* (por exemplo, o de fora) que dá a temperatura agora. Máxima e mínima continuam da previsão.
+  satellite:
+    name: Bom dia — aparelho de voz de reserva
+    description: Um assist_satellite.* que fala o Bom dia quando o alto-falante ou a voz falham, ou quando não há alto-falante.
+  tts_voice:
+    name: Bom dia — voz (português)
+    description: O id da voz no motor de voz (por exemplo, ElevenLabs). Vale também em inglês se a voz em inglês ficar vazia.
+  tts_voice_en:
+    name: Bom dia — voz (inglês)
+    description: O id da voz em inglês.
+  speaker_delay:
+    name: Bom dia — espera antes de falar (s)
+    description: Segundos antes de tocar no alto-falante (padrão 2). A fala automática não espera.
+  speaker_wait:
+    name: Bom dia — espera pelo alto-falante (s)
+    description: Segundos que espera o alto-falante voltar se estiver indisponível (padrão 8).
+  speaker_busy:
+    name: Bom dia — alto-falante tocando
+    description: "voice: fala no aparelho de voz de reserva sem interromper (padrão). interrupt: fala por cima da TV ou da música."
+  card_seconds:
+    name: Bom dia — cartões no painel (s)
+    description: Quanto tempo os cartões ficam no painel (padrão 40).
+  prepare_minutes:
+    name: Bom dia — preparar antes (min)
+    description: Minutos antes do horário escolhido para preparar o Bom dia, para a fala sair na hora (padrão 30; 0 = desligado).
+  prepare_at:
+    name: Bom dia — preparar às (HH:MM)
+    description: Numa casa sem horário escolhido que usa o evento iq_bom_dia, a hora de começar a preparar (padrão 06:00).

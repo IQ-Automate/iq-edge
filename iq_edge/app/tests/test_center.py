@@ -14,6 +14,9 @@ from tests.fakes import EdgeCase
 
 class PairingTests(EdgeCase):
     def test_pairs_with_the_options_code_and_clears_it(self):
+        from iq_edge import settings
+        settings.write_json(settings.data_dir() / 'options.json', {'center_url': 'https://business.iqautom8.com', 'pairing_code': '123456'},
+                            private=False)
         with mock.patch.dict(os.environ, {'IQ_PAIRING_CODE': '123 456'}):
             edge = Center()
             self.assertEqual(edge.step(), 0)
@@ -24,11 +27,21 @@ class PairingTests(EdgeCase):
             self.assertEqual(stat.S_IMODE(os.stat(edge.path()).st_mode), 0o600)
         self.assertEqual(self.center.pair_info['code'], '123456')
         self.assertEqual((self.center.pair_info['addon_version'], self.center.pair_info['arch'], self.center.pair_info['ha_version']),
-                         ('0.1.0', 'amd64', '2026.10.4'))
+                         ('0.2.0', 'amd64', '2026.10.4'))
         self.assertEqual(self.ha.options_posts, [{'options': {'center_url': self.center.url, 'pairing_code': ''}}])
         public = edge.public()
         self.assertEqual((public['state'], public['paired'], public['home_name']), ('paired', True, 'Casa <Teste>'))
         self.assertNotIn('C' * 43, json.dumps(public))
+
+    def test_unreadable_options_are_never_written_back(self):
+        from iq_edge import settings
+        with mock.patch.dict(os.environ, {'IQ_PAIRING_CODE': '123456'}), self.assertLogs('iq_edge.center', level='WARNING') as logs:
+            self.assertEqual(Center().step(), 0)  # no options.json: paired, but the Supervisor is never asked to replace the options
+        self.assertEqual(self.ha.options_posts, [])
+        self.assertIn('Não consegui ler as opções', logs.output[0])
+        (settings.data_dir() / 'options.json').write_text('{not json', encoding='utf-8')
+        Center().clear_option_code()
+        self.assertEqual(self.ha.options_posts, [])
 
     def test_a_refused_code_is_not_sent_again_by_itself(self):
         with mock.patch.dict(os.environ, {'IQ_PAIRING_CODE': '999999'}):
@@ -60,7 +73,7 @@ class JobTests(PairedCase):
         self.assertEqual(self.edge.step(), 0)
         beat = self.center.heartbeats[0]
         self.assertEqual((beat['ha_version'], beat['health'], beat['addon_version'], beat['programs']),
-                         ('2026.10.4', 'ok', '0.1.0', {'automations': 1, 'scripts': 0, 'scenes': 0}))
+                         ('2026.10.4', 'ok', '0.2.0', {'automations': 1, 'scripts': 0, 'scenes': 0}))
         self.assertEqual(self.center.results[job], {'ok': True, 'status': 200, 'data': self.ha.config})
         self.assertEqual(self.edge.time_zone, 'America/New_York')
         self.assertEqual(self.edge.step(), 0.0)  # nothing queued: 204, poll again at once
@@ -104,7 +117,7 @@ class JobTests(PairedCase):
         self.assertEqual(self.ha.requests_to('/core/api/services/tts'), [])  # and spoke nothing
         ping = self.center.queue('ping', {}, job_id='g')
         self.edge.step()
-        self.assertEqual(self.center.results[ping]['data'], {'pong': True, 'addon_version': '0.1.0'})
+        self.assertEqual(self.center.results[ping]['data'], {'pong': True, 'addon_version': '0.2.0'})
 
     def test_an_expired_job_never_runs(self):
         self.edge.last_heartbeat = self.edge.clock()

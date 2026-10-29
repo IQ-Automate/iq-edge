@@ -42,6 +42,8 @@ class FakeHA(_Server):
                        {'entity_id': 'weather.casa', 'state': 'sunny', 'attributes': {'temperature': 25, 'temperature_unit': '°C'}},
                        {'entity_id': 'person.franco', 'state': 'home', 'attributes': {'friendly_name': 'Franco'}}]
         self.objects = {'automation': {'1': {'id': '1', 'alias': 'Porta'}}, 'script': {}, 'scene': {}}
+        # lote A5: the voice cached ahead (tts_get_url + the audio) and the Bom dia's own service calls (tts.speak...)
+        self.tts_requests, self.tts_fail, self.service_calls = [], False, []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -93,7 +95,16 @@ class FakeHA(_Server):
                     return self.answer(200, {'result': 'ok'})
                 if method == 'POST' and path == '/api/config/core/check_config':
                     return self.answer(200, {'result': 'valid', 'errors': None})
+                if method == 'POST' and path == '/api/tts_get_url':
+                    fake.tts_requests.append(json.loads(body))
+                    if fake.tts_fail:
+                        return self.answer(500, {'message': 'Error'})
+                    return self.answer(200, {'url': 'http://homeassistant.local:8123/api/tts_proxy/abc123.mp3',
+                                             'path': '/api/tts_proxy/abc123.mp3'})
+                if method == 'GET' and path == '/api/tts_proxy/abc123.mp3':
+                    return self.answer(200, raw=b'ID3' + b'\0' * 2048, content_type='audio/mpeg')
                 if method == 'POST' and path.startswith('/api/services/'):
+                    fake.service_calls.append((path, json.loads(body) if body else None))
                     return self.answer(200, [])  # the Bom dia's own speech only (tts.speak, volume_set...); the relay never comes here
                 if method == 'POST' and path.startswith('/api/events/'):
                     return self.answer(200, {'message': 'Event fired.'})
@@ -121,6 +132,9 @@ class FakeCenter(_Server):
         self.code, self.credential, self.previous, self.home_id = code, None, None, 'home-1'
         self.jobs, self.results, self.heartbeats, self.prefs, self.log = [], {}, [], [], []
         self.revoked, self.next_version = False, 7
+        # briefing-compose (lote A5): (status, JSON answer or raw bytes, extra headers); every call kept with its headers
+        self.compose_answer = (503, {'error': 'no_key', 'message': 'no key'}, {})
+        self.composed = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -179,6 +193,18 @@ class FakeCenter(_Server):
                 if path == 'unpair':
                     fake.revoked = True
                     return self.answer(200, {'ok': True})
+                if method == 'POST' and path == 'briefing-compose':
+                    fake.composed.append({'body': data, 'headers': dict(self.headers), 'size': len(body)})
+                    status, answer, extra = fake.compose_answer
+                    raw = answer if isinstance(answer, bytes) else json.dumps(answer).encode()
+                    self.send_response(status)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(raw)))
+                    for name, value in extra.items():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return None
                 return self.answer(404, {'error': 'route'})
 
             def do_GET(self):

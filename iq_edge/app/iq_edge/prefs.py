@@ -6,8 +6,9 @@ The tab's "Salvar" writes here first (nothing is lost without internet) and mark
 number (then the file carries it). A change from the center is confirmed with the version it sent."""
 import copy
 import threading
+from datetime import datetime, timezone
 
-from . import briefing, settings
+from . import briefing, ready, settings
 
 DEFAULTS = {  # a new home, before anyone saved: weather and a few headlines in Portuguese; no speaker chosen yet
     'house_state': True, 'weather': True,
@@ -88,8 +89,14 @@ def preview(values, language=None):
     return briefing.preview(values, language)
 
 
-def speak_now():
-    """"Falar agora" and the schedule: the whole Bom dia on the chosen speaker (in the background). (spoken?, text)."""
-    if briefing.speaker_config() is None:
+def speak_now(language=None):
+    """"Falar agora", the schedule and Home Assistant's event iq_bom_dia: the whole Bom dia on the chosen speaker (or, without one,
+    on the reserve satellite) in the background. `language` ('pt'/'en') wins over the saved one. The Bom dia prepared ahead
+    (ready.py) is used when it is under 2 hours old; otherwise it is composed now. (spoken?, text)."""
+    if briefing.speaker_config() is None and not briefing.satellite():
         return False, ''
-    return True, briefing.handle('bom dia automatico') or ''
+    language = language if language in ('pt', 'en') else briefing.idioma_automatico()
+    text = briefing.handle('bom dia automatico', idioma_pedido=language, pronto=ready.fresh(language)) or ''
+    if text != briefing._T[language]['falha_casa']:  # Home Assistant answered: the preparation of this morning can stop
+        set_state(last_spoken_at=datetime.now(timezone.utc).isoformat(timespec='seconds'))
+    return True, text

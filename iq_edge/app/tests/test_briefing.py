@@ -1,6 +1,7 @@
 """Testes do resumo falado da casa ("bom dia") — copia dos testes do Orange Pi (lote H2) para o add-on IQ (lote A4): sem as
-rotas FastAPI do contrato v1 do Pi, que o add-on nao tem. Tudo com dados e IA falsos:
-nenhum teste chama o Home Assistant, a internet ou a Anthropic de verdade."""
+rotas FastAPI do contrato v1 do Pi, que o add-on nao tem. Lote A5: a IA e a do centro (briefing-compose); aqui um cliente
+falso com `compose(pedido)` recebe o corpo do contrato. Tudo com dados e IA falsos: nenhum teste chama o Home Assistant, a
+internet ou o centro de verdade."""
 
 import os
 import unittest
@@ -39,6 +40,19 @@ RSS = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>Feed</title>
 ATOM = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
 <title>Alertas</title><entry><title>Alerta de enchente</title></entry>
 <entry><title>Outro alerta</title></entry></feed>"""
+
+
+def centro_falso(resposta):
+    """Um centro falso: `compose(pedido)` guarda o pedido e devolve `resposta` (ou levanta, se for uma excecao)."""
+    pedidos = []
+
+    def compose(pedido):
+        pedidos.append(pedido)
+        if isinstance(resposta, BaseException):
+            raise resposta
+        return resposta
+
+    return SimpleNamespace(compose=compose), pedidos
 
 
 class DeteccaoTest(unittest.TestCase):
@@ -252,15 +266,6 @@ class NoticiasImportantesTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def _cliente(self, json_texto: str):
-        chamadas = []
-
-        def create(**kwargs):
-            chamadas.append(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text=json_texto)])
-
-        return SimpleNamespace(messages=SimpleNamespace(create=create)), chamadas
-
     def test_filtro_por_regra_tira_crime_e_morte(self) -> None:
         titulos = ["Man shot in parking lot", "Senate passes budget", "Homem morre em acidente", "Fed holds rates", "Police arrest suspect"]
         self.assertEqual(briefing.filtrar_por_regra(titulos), ["Senate passes budget", "Fed holds rates"])
@@ -270,10 +275,10 @@ class NoticiasImportantesTest(unittest.TestCase):
         self.assertEqual(lim, {"Orlando": 2, "EUA": 3, "Brasil": 2})
 
     def test_ia_escolhe_e_os_cartoes_usam_a_escolha(self) -> None:
-        cliente, chamadas = self._cliente(
-            '{"speech": "Bom dia, tem alerta de furacao.", "noticias": ['
-            '{"fonte": "Orlando", "indices": [1]}, {"fonte": "EUA", "indices": [0, 2]}, {"fonte": "Brasil", "indices": [1]}]}'
-        )
+        cliente, pedidos = centro_falso({
+            "text": "Bom dia, tem alerta de furacao.", "model": "gpt-4o-mini", "words": 6,
+            "picks": [{"source": "Orlando", "indices": [1]}, {"source": "EUA", "indices": [0, 2]}, {"source": "Brasil", "indices": [1]}],
+        })
         fala, escolhidas = briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
         self.assertEqual(fala, "Bom dia, tem alerta de furacao.")
         self.assertEqual(escolhidas, [
@@ -281,31 +286,32 @@ class NoticiasImportantesTest(unittest.TestCase):
             ("EUA", ["Senate passes major budget bill", "Fed holds interest rates steady"]),
             ("Brasil", ["STF decide sobre ação histórica"]),
         ])
-        # as regras de importancia e todas as candidatas foram para a IA
-        sistema = chamadas[0]["system"]
-        self.assertIn("ZERO noticias", sistema)
-        self.assertIn("[2] Road closures planned for I-4 this week", sistema)
-        self.assertIn("Manchetes candidatas (EUA; escolha no maximo 3)", sistema)
+        # as regras de importancia e todas as candidatas, com o limite de cada fonte, foram ao centro
+        pedido = pedidos[0]
+        self.assertIn("ZERO noticias", pedido["rules"])
+        self.assertEqual(pedido["candidates"], [
+            {"source": "Orlando", "limit": 2, "titles": self.CANDIDATAS[0][1]},
+            {"source": "EUA", "limit": 3, "titles": self.CANDIDATAS[1][1]},
+            {"source": "Brasil", "limit": 2, "titles": self.CANDIDATAS[2][1]},
+        ])
 
     def test_fonte_sem_nada_importante_fica_de_fora(self) -> None:
-        cliente, _ = self._cliente(
-            '{"speech": "Bom dia.", "noticias": [{"fonte": "Orlando", "indices": []}, {"fonte": "EUA", "indices": [0]}, {"fonte": "Brasil", "indices": []}]}'
-        )
+        cliente, _ = centro_falso({"text": "Bom dia.", "picks": [
+            {"source": "Orlando", "indices": []}, {"source": "EUA", "indices": [0]}, {"source": "Brasil", "indices": []}]})
         _, escolhidas = briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
         cartoes = briefing.build_cards(self.dados, PREVISAO, escolhidas, "pt")
         self.assertEqual([c["titulo"] for c in cartoes], ["Clima", "Casa", "EUA"])
 
     def test_indices_invalidos_repetidos_ou_acima_do_limite_sao_ignorados(self) -> None:
-        cliente, _ = self._cliente(
-            '{"speech": "Bom dia.", "noticias": [{"fonte": "orlando", "indices": [9, -1, 1, 1, 0, 2]}, {"fonte": "Marte", "indices": [0]}]}'
-        )
+        cliente, _ = centro_falso({"text": "Bom dia.", "picks": [
+            {"source": "orlando", "indices": [9, -1, 1, 1, 0, 2, True, "1"]}, {"source": "Marte", "indices": [0]}, "lixo"]})
         _, escolhidas = briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
         orlando = dict(escolhidas)["Orlando"]
         self.assertEqual(orlando, ["Hurricane watch issued for Orange County", "Man shot in Kissimmee parking lot"])  # max 2, sem repetir
         self.assertEqual(dict(escolhidas)["EUA"], [])
 
     def test_resposta_sem_selecao_usa_o_filtro_por_regra(self) -> None:
-        cliente, _ = self._cliente('{"speech": "Bom dia, tudo certo."}')
+        cliente, _ = centro_falso({"text": "Bom dia, tudo certo."})
         fala, escolhidas = briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
         self.assertEqual(fala, "Bom dia, tudo certo.")
         self.assertEqual(dict(escolhidas)["Orlando"], ["Hurricane watch issued for Orange County", "Road closures planned for I-4 this week"])
@@ -319,18 +325,69 @@ class NoticiasImportantesTest(unittest.TestCase):
         self.assertEqual(dict(escolhidas)["Brasil"], ["STF decide sobre ação histórica", "Time vence o clássico"])
 
     def test_regras_proprias_substituem_as_padrao(self) -> None:
-        cliente, chamadas = self._cliente('{"speech": "Bom dia.", "noticias": []}')
-        with mock.patch.dict(os.environ, {"IQ_BRIEFING_NEWS_RULES": "So esporte, nada alem disso."}):
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_NEWS_RULES": "So esporte, nada alem disso.", "IQ_BRIEFING_TOTAL": "2-3"}):
             briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
-        sistema = chamadas[0]["system"]
-        self.assertIn("So esporte, nada alem disso.", sistema)
-        self.assertNotIn("plantao de telejornal", sistema)
+        self.assertEqual(pedidos[0]["rules"], "So esporte, nada alem disso.")
+        self.assertEqual((pedidos[0]["total_min"], pedidos[0]["total_max"]), (2, 3))  # o total vai nos campos do contrato
 
-    def test_tamanho_maximo_configuravel(self) -> None:
-        cliente, chamadas = self._cliente('{"speech": "Bom dia.", "noticias": []}')
-        with mock.patch.dict(os.environ, {"IQ_BRIEFING_MAX_WORDS": "60"}):
+    def test_tamanho_maximo_configuravel_e_limitado(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
+        for valor, esperado in (("60", 60), ("10", 40), ("900", 300)):
+            with mock.patch.dict(os.environ, {"IQ_BRIEFING_MAX_WORDS": valor}):
+                briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
+            self.assertEqual(pedidos[-1]["max_words"], esperado)
+
+    def test_regras_longas_sao_cortadas_em_2000(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_NEWS_RULES": "x" * 5000, "IQ_BRIEFING_TOTAL": "4-5"}):
             briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
-        self.assertIn("60 palavras", chamadas[0]["system"])
+        self.assertEqual(len(pedidos[0]["rules"]), 2000)
+        self.assertEqual((pedidos[0]["total_min"], pedidos[0]["total_max"]), (4, 5))  # o total pedido nunca se perde
+
+    def test_limites_do_centro_sao_cortados_antes_de_enviar(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
+        dados = {"pessoas": ["N" * 100] * 25, "abertos": ["A" * 200] * 70, "alarme": "estado_de_alarme_muito_longo_" * 3,
+                 "clima": {"condicao": "c" * 90, "temperatura": 20.0, "unidade": "°C"}}
+        briefing.compose(dados, None, [], "pt", client=cliente)
+        fatos = pedidos[0]["facts"]
+        self.assertEqual((len(fatos["names"]), max(map(len, fatos["names"]))), (20, 80))
+        self.assertEqual((len(fatos["open"]), max(map(len, fatos["open"]))), (60, 120))
+        self.assertEqual((len(fatos["alarm"]), len(fatos["weather"]["condition"])), (40, 40))
+        self.assertNotIn("total_min", pedidos[0])  # sem total pedido, os campos opcionais nao vao
+        sem_unidade = {"clima": {"condicao": "rainy", "temperatura": 20.0, "unidade": ""}}
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_TEMP_UNIT": ""}):
+            briefing.compose(sem_unidade, None, [], "pt", client=cliente)
+        self.assertIsNone(pedidos[1]["facts"]["weather"])  # unidade so "C" ou "F": sem ela, o clima nao vai
+
+    def test_corpo_grande_fica_abaixo_de_64_kb_e_os_indices_continuam_valendo(self) -> None:
+        candidatas = [(f"Fonte {i}", [f"{i}-{j} " + "manchete longa " * 30 for j in range(40)]) for i in range(25)]
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": [{"source": "Fonte 0", "indices": [0, 29, 39]}]})
+        _, escolhidas = briefing.compose(self.dados, PREVISAO, candidatas, "pt", client=cliente)
+        import json
+        pedido = pedidos[0]
+        self.assertLessEqual(len(json.dumps(pedido).encode()), 64 * 1024)
+        self.assertLessEqual(len(pedido["candidates"]), 20)
+        self.assertTrue(all(len(f["titles"]) <= 30 and all(len(t) <= 300 for t in f["titles"]) for f in pedido["candidates"]))
+        enviados = len(pedido["candidates"][0]["titles"])
+        esperado = [candidatas[0][1][0]] + ([candidatas[0][1][29]] if enviados > 29 else [])
+        self.assertEqual(dict(escolhidas)["Fonte 0"], esperado)  # 39 nunca foi enviado: descartado
+        self.assertEqual(dict(escolhidas)["Fonte 24"], [])  # fonte que nao foi ao centro fica sem noticia
+
+    def test_fontes_homonimas_viram_uma_e_os_picks_valem_por_nome(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": [{"source": "EUA", "indices": [3, 0]}, {"source": "Brasil", "indices": []}]})
+        candidatas = [("EUA", ["NPR um", "NPR dois"]), ("Brasil", ["G1 um"]), ("eua", ["BBC um", "NPR dois", "BBC dois"])]
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_PICK_MAP": "EUA=3"}):
+            _, escolhidas = briefing.compose(self.dados, PREVISAO, candidatas, "pt", client=cliente)
+        self.assertEqual([(f["source"], f["titles"]) for f in pedidos[0]["candidates"]],
+                         [("EUA", ["NPR um", "NPR dois", "BBC um", "BBC dois"]), ("Brasil", ["G1 um"])])
+        self.assertEqual(escolhidas, [("EUA", ["BBC dois", "NPR um"]), ("Brasil", [])])
+
+    def test_fonte_sem_titulo_ou_com_limite_zero_nao_vai(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_PICK_MAP": "EUA=0"}):
+            briefing.compose(self.dados, PREVISAO, [("Orlando", []), ("EUA", ["Fed"]), ("Brasil", ["STF"])], "pt", client=cliente)
+        self.assertEqual([f["source"] for f in pedidos[0]["candidates"]], ["Brasil"])
 
     def test_fontes_com_o_mesmo_nome_se_juntam(self) -> None:
         capturado = []
@@ -387,17 +444,11 @@ class DuasUnidadesTest(unittest.TestCase):
 
     def test_ia_recebe_as_duas_unidades(self) -> None:
         self._com("FC")
-        chamadas = []
-
-        def create(**kwargs):
-            chamadas.append(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"speech": "Bom dia.", "noticias": []}')])
-
-        cliente = SimpleNamespace(messages=SimpleNamespace(create=create))
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
         briefing.compose(self.DADOS_C, self.PREV_C, [], "pt", client=cliente)
-        sistema = chamadas[0]["system"]
-        self.assertIn("77 graus Fahrenheit = 25 graus Celsius", sistema)
-        self.assertIn("diga as duas", sistema)
+        self.assertEqual(pedidos[0]["facts"]["weather"], {"temp": "77", "unit": "F", "temp2": "25", "unit2": "C", "condition": "chuva",
+                                                           "high": "84", "low": "72", "rain": "60", "say_unit": True,
+                                                           "high2": "29", "low2": "22"})
 
     def test_modo_f_continua_so_fahrenheit(self) -> None:
         self._com("F")
@@ -409,48 +460,94 @@ class IaTest(unittest.TestCase):
     def setUp(self) -> None:
         self.dados = briefing.collect_house(ESTADOS)
 
-    def _cliente(self, texto_json: str):
-        chamadas = []
-
-        def create(**kwargs):
-            chamadas.append(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text=texto_json)])
-
-        return SimpleNamespace(messages=SimpleNamespace(create=create)), chamadas
-
-    def test_usa_o_texto_da_ia(self) -> None:
-        cliente, chamadas = self._cliente('{"speech": "Bom dia, tudo certo por aqui."}')
+    def test_usa_o_texto_da_ia_e_manda_so_os_dados_do_contrato(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia, tudo certo por aqui.", "picks": [{"source": "Orlando", "indices": [0]}]})
         fala = briefing.compose_spoken(self.dados, PREVISAO, [("Orlando", ["Furacao"])], "pt", client=cliente)
         self.assertEqual(fala, "Bom dia, tudo certo por aqui.")
-        sistema = chamadas[0]["system"]
-        self.assertIn("NAO CONFIAVEIS", sistema)
-        self.assertIn("Furacao", sistema)
-        self.assertIn("Portão da garagem", sistema)
-        self.assertIn("110 palavras", sistema)
-        # nomes exatos e unidade por extenso (bugs vistos no teste da casa)
-        self.assertIn("EXATAMENTE como nos dados", sistema)
-        self.assertIn("graus Fahrenheit ou graus Celsius", sistema)
-        self.assertIn("78 graus Fahrenheit", sistema)
-        self.assertIn("Victtor, Matheus", sistema)
+        pedido = pedidos[0]
+        self.assertEqual(set(pedido), {"language", "max_words", "rules", "house_state", "facts", "candidates"})
+        self.assertEqual((pedido["language"], pedido["max_words"], pedido["house_state"]), ("pt", 110, True))
+        self.assertEqual(pedido["facts"], {
+            "names": ["Victtor", "Matheus"],  # nomes exatos, como no HA
+            "weather": {"temp": "78", "unit": "F", "temp2": None, "unit2": None, "condition": "chuva",
+                        "high": "84", "low": "71", "rain": "62", "say_unit": True},
+            "open": ["Portão da garagem"],
+            "alarm": "desarmado",
+        })
+        self.assertEqual(pedido["candidates"], [{"source": "Orlando", "limit": 2, "titles": ["Furacao"]}])
+
+    def test_sem_o_estado_da_casa_nao_vai_aberto_nem_alarme(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_CASA": "nao", "IQ_BRIEFING_CLIMA": "sim"}):
+            briefing.compose(self.dados, PREVISAO, [], "pt", client=cliente)
+        self.assertEqual((pedidos[0]["house_state"], pedidos[0]["facts"]["open"], pedidos[0]["facts"]["alarm"]), (False, [], None))
+        self.assertEqual(pedidos[0]["facts"]["names"], ["Victtor", "Matheus"])
+
+    def test_alarme_armado_ou_disparado_vai_no_idioma(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Good morning.", "picks": []})
+        for estado, esperado in (("armed_away", "armed"), ("triggered", "triggered"), (None, None)):
+            briefing.compose(dict(self.dados, alarme=estado), None, [], "en", client=cliente)
+            self.assertEqual(pedidos[-1]["facts"]["alarm"], esperado)
 
     def test_ingles_pede_ingles(self) -> None:
-        cliente, chamadas = self._cliente('{"speech": "Good morning."}')
+        cliente, pedidos = centro_falso({"text": "Good morning.", "picks": []})
         briefing.compose_spoken(self.dados, PREVISAO, [], "en", client=cliente)
-        self.assertIn("American English", chamadas[0]["system"])
+        self.assertEqual((pedidos[0]["language"], pedidos[0]["max_words"], pedidos[0]["facts"]["weather"]["condition"]), ("en", 105, "rain"))
 
-    def test_ia_com_erro_cai_no_texto_por_regra(self) -> None:
-        def create(**kwargs):
-            raise RuntimeError("limite")
-
-        cliente = SimpleNamespace(messages=SimpleNamespace(create=create))
-        fala = briefing.compose_spoken(self.dados, PREVISAO, [], "pt", client=cliente)
+    def test_ia_com_erro_cai_no_texto_por_regra_e_o_log_nao_tem_dados(self) -> None:
+        erro = RuntimeError("Victtor Furacao")
+        erro.reason = "rate"
+        cliente, _ = centro_falso(erro)
+        with self.assertLogs("iq_edge.briefing", level="WARNING") as logs:
+            fala = briefing.compose_spoken(self.dados, PREVISAO, [("Orlando", ["Furacao"])], "pt", client=cliente)
         self.assertTrue(fala.startswith("Bom dia, Victtor e Matheus."))
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("(rate)", logs.output[0])
+        self.assertNotIn("Victtor", logs.output[0])
+        self.assertNotIn("Furacao", logs.output[0])
 
-    def test_resposta_vazia_cai_no_texto_por_regra(self) -> None:
-        cliente, _ = self._cliente('{"speech": "   "}')
-        fala = briefing.compose_spoken(self.dados, PREVISAO, [], "pt", client=cliente)
-        self.assertTrue(fala.startswith("Bom dia"))
-        self.assertIn("Portão da garagem", fala)
+    def test_resposta_vazia_ou_estranha_cai_no_texto_por_regra(self) -> None:
+        for resposta in ({"text": "   "}, {"picks": []}, ["lista"], None, {"text": None}):
+            cliente, _ = centro_falso(resposta)
+            fala = briefing.compose_spoken(self.dados, PREVISAO, [], "pt", client=cliente)
+            self.assertTrue(fala.startswith("Bom dia"), resposta)
+            self.assertIn("Portão da garagem", fala)
+
+    def test_preparo_tira_a_frase_de_saudacao_inteira(self) -> None:
+        casos = {
+            "Bom dia a todos! Hoje tem obras.": "Hoje tem obras.",
+            "Olá! Bom dia. Chuva à tarde.": "Chuva à tarde.",
+            "Good morning, everyone. Rain later.": "Rain later.",
+            "Hi there! Rain later.": "Rain later.",
+            "Bom dia hoje tem obras": "Hoje tem obras",
+            "Hoje tem obras.": "Hoje tem obras.",
+            "Oito horas. Bom dia.": "Oito horas. Bom dia.",
+            # primeira frase longa tem conteudo: sai so a saudacao
+            "Bom dia, hoje faz vinte e cinco graus com chuva forte e vento na cidade.":
+                "Hoje faz vinte e cinco graus com chuva forte e vento na cidade.",
+        }
+        for texto, esperado in casos.items():
+            cliente, _ = centro_falso({"text": texto, "picks": []})
+            fala, _ = briefing.compose(self.dados, PREVISAO, [], "pt", client=cliente, preparo=True)
+            self.assertEqual(fala, esperado, texto)
+        cliente, _ = centro_falso({"text": "Bom dia!", "picks": []})  # so a saudacao: o texto por regra (clima e noticias)
+        fala, _ = briefing.compose(self.dados, PREVISAO, [], "pt", client=cliente, preparo=True)
+        self.assertTrue(fala.startswith("Agora faz 78 graus Fahrenheit"))
+
+    def test_fala_longa_demais_e_cortada(self) -> None:
+        cliente, _ = centro_falso({"text": "palavra " * 2000, "picks": []})
+        self.assertLessEqual(len(briefing.compose_spoken(self.dados, PREVISAO, [], "pt", client=cliente)), 4000)
+
+    def test_o_centro_registrado_so_vale_com_a_casa_pareada(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia do centro.", "picks": []})
+        pareado = [False]
+        cliente.paired = lambda: pareado[0]
+        briefing.usar_centro(cliente)
+        self.addCleanup(briefing.usar_centro, None)
+        self.assertTrue(briefing.compose_spoken(self.dados, PREVISAO, [], "pt").startswith("Bom dia, Victtor"))
+        self.assertEqual(pedidos, [])
+        pareado[0] = True
+        self.assertEqual(briefing.compose_spoken(self.dados, PREVISAO, [], "pt"), "Bom dia do centro.")
 
     def test_sem_chave_da_ia_cai_no_texto_por_regra(self) -> None:
         with mock.patch("iq_edge.briefing._ai_client", return_value=None):
@@ -1070,19 +1167,15 @@ class UnidadePeloIdiomaTest(unittest.TestCase):
             self.assertEqual(c["linhas"][0], "77°F · rain")
 
     def test_a_ia_recebe_so_a_unidade_do_idioma(self) -> None:
-        chamadas = []
-
-        def create(**kwargs):
-            chamadas.append(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"speech": "Bom dia.", "noticias": []}')])
-
-        cliente = SimpleNamespace(messages=SimpleNamespace(create=create))
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
         briefing.compose(self.DADOS_F, self.PREV_F, [], "pt", client=cliente)
-        sistema = chamadas[0]["system"]
-        self.assertIn("Clima agora: 25 graus,", sistema)
-        self.assertIn("SEM dizer Celsius nem Fahrenheit", sistema)
-        self.assertNotIn("= 25 graus", sistema)  # nao e o formato das duas unidades
-        self.assertNotIn("graus Celsius", sistema.split("Dados:")[1])  # os dados tambem nao trazem o nome
+        clima = pedidos[0]["facts"]["weather"]
+        self.assertEqual((clima["temp"], clima["unit"], clima["temp2"], clima["unit2"], clima["high"]), ("25", "C", None, None, "29"))
+        self.assertIs(clima["say_unit"], False)  # pelo idioma: a fala diz so "graus"
+        self.assertNotIn("high2", clima)
+        briefing.compose(self.DADOS_C, self.PREV_C, [], "en", client=cliente)
+        clima = pedidos[1]["facts"]["weather"]
+        self.assertEqual((clima["temp"], clima["unit"], clima["temp2"], clima["unit2"]), ("77", "F", None, None))
 
     def test_apelidos_do_modo_e_modos_antigos_continuam(self) -> None:
         for valor in ("idioma", "AUTO", "lang"):
@@ -1109,18 +1202,12 @@ class UnidadeFalada(unittest.TestCase):
                 f = briefing.build_spoken_fallback(self.DADOS, None, [], "pt")
             self.assertIn(esperado, f, modo)
 
-    def test_prompt_dos_outros_modos_manda_dizer_a_unidade(self) -> None:
-        chamadas = []
-
-        def create(**kwargs):
-            chamadas.append(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"speech": "Bom dia.", "noticias": []}')])
-
-        cliente = SimpleNamespace(messages=SimpleNamespace(create=create))
+    def test_sem_previsao_maxima_minima_e_chuva_vao_nulas(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
         with mock.patch.dict(os.environ, {"IQ_BRIEFING_TEMP_UNIT": "C"}):
             briefing.compose(self.DADOS, None, [], "pt", client=cliente)
-        self.assertIn("graus Fahrenheit ou graus Celsius", chamadas[0]["system"])
-        self.assertNotIn("SEM dizer Celsius nem Fahrenheit", chamadas[0]["system"])
+        self.assertEqual(pedidos[0]["facts"]["weather"], {"temp": "25", "unit": "C", "temp2": None, "unit2": None, "condition": "chuva",
+                                                          "high": None, "low": None, "rain": None, "say_unit": True})
 
 
 class SensorDeTemperaturaTest(unittest.TestCase):
@@ -1226,15 +1313,6 @@ class CasaDesligadaTest(unittest.TestCase):
                 e["state"] = "triggered"
         self.dados_alarme = briefing.collect_house(estados)
 
-    def _cliente(self, texto_json: str):
-        chamadas = []
-
-        def create(**kwargs):
-            chamadas.append(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text=texto_json)])
-
-        return SimpleNamespace(messages=SimpleNamespace(create=create)), chamadas
-
     def _sem_opcao(self) -> None:
         patcher = mock.patch.dict(os.environ)
         patcher.start()
@@ -1290,25 +1368,19 @@ class CasaDesligadaTest(unittest.TestCase):
         self.assertEqual([x["titulo"] for x in c], ["Orlando", "Brasil"])
 
     # (c) IA
-    def test_prompt_da_ia_sem_o_estado_da_casa(self) -> None:
-        cliente, chamadas = self._cliente('{"speech": "Bom dia, Victtor e Matheus.", "noticias": []}')
+    def test_pedido_ao_centro_sem_o_estado_da_casa(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia, Victtor e Matheus.", "picks": []})
         with mock.patch.dict(os.environ, self.DESLIGADA):
             fala = briefing.compose_spoken(self.dados, PREVISAO, [("Orlando", ["Furacao"])], "pt", client=cliente)
         self.assertEqual(fala, "Bom dia, Victtor e Matheus.")
-        sistema = chamadas[0]["system"]
-        self.assertNotIn("Aberto ou destravado", sistema)
-        self.assertNotIn("Alarme:", sistema)
-        self.assertNotIn("Portão da garagem", sistema)
-        self.assertNotIn("diga o que esta aberto", sistema)
-        self.assertNotIn("{regra_casa}", sistema)
-        self.assertIn(
-            "NAO fale do estado da casa (portas, janelas, alarme): o resumo e so cumprimento, clima e noticias",
-            sistema,
-        )
+        pedido = pedidos[0]
+        self.assertFalse(pedido["house_state"])
+        self.assertEqual((pedido["facts"]["open"], pedido["facts"]["alarm"]), ([], None))
+        self.assertNotIn("Portão da garagem", str(pedido))
         # o cumprimento, o clima e as noticias continuam nos dados
-        self.assertIn("Pessoas em casa: Victtor, Matheus", sistema)
-        self.assertIn("78 graus Fahrenheit", sistema)
-        self.assertIn("Furacao", sistema)
+        self.assertEqual(pedido["facts"]["names"], ["Victtor", "Matheus"])
+        self.assertEqual((pedido["facts"]["weather"]["temp"], pedido["facts"]["weather"]["unit"]), ("78", "F"))
+        self.assertEqual(pedido["candidates"][0]["titles"], ["Furacao"])
 
     # (d) opcao ausente: tudo como antes
     def test_sem_a_opcao_tudo_como_antes(self) -> None:
@@ -1333,19 +1405,12 @@ class CasaDesligadaTest(unittest.TestCase):
         self.assertEqual([x["titulo"] for x in c], ["Clima", "Casa", "Orlando", "Brasil"])
         self.assertEqual(c[1]["tom"], "alerta")
 
-    def test_sem_a_opcao_o_prompt_da_ia_e_o_de_sempre(self) -> None:
+    def test_sem_a_opcao_o_pedido_ao_centro_leva_a_casa(self) -> None:
         self._sem_opcao()
-        cliente, chamadas = self._cliente('{"speech": "Bom dia.", "noticias": []}')
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
         briefing.compose_spoken(self.dados, PREVISAO, [], "pt", client=cliente)
-        sistema = chamadas[0]["system"]
-        self.assertIn("Aberto ou destravado: Portão da garagem", sistema)
-        self.assertIn("Alarme: disarmed", sistema)
-        self.assertIn(
-            "diga o que esta aberto ou destravado, ou que a casa esta toda fechada; fale do "
-            "alarme so se estiver armado ou disparado.\n",
-            sistema,
-        )
-        self.assertNotIn("NAO fale do estado da casa", sistema)
+        self.assertTrue(pedidos[0]["house_state"])
+        self.assertEqual((pedidos[0]["facts"]["open"], pedidos[0]["facts"]["alarm"]), (["Portão da garagem"], "desarmado"))
 
     def test_opcao_sim_equivale_a_ausente(self) -> None:
         for valor in ("sim", "SIM", "1", "on", ""):
@@ -1399,14 +1464,8 @@ def _ler_json(caminho):
     return json.loads(_ler_texto(caminho))
 
 
-def _cliente_falso(texto_json='{"speech": "Bom dia, Victtor.", "noticias": []}'):
-    chamadas = []
-
-    def create(**kwargs):
-        chamadas.append(kwargs)
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text=texto_json)])
-
-    return SimpleNamespace(messages=SimpleNamespace(create=create)), chamadas
+def _cliente_falso(texto="Bom dia, Victtor."):
+    return centro_falso({"text": texto, "picks": []})
 
 
 class PreferenciasDoCentroTests(unittest.TestCase):
@@ -1442,13 +1501,14 @@ class PreferenciasDoCentroTests(unittest.TestCase):
         self.assertEqual((cfg["speaker"], cfg["engine"], cfg["volume"], cfg["voz_pt"]),
                          ("media_player.living", "tts.elevenlabs_text_to_speech", 0.65, "voz-brian"))  # a voz continua do .env
         self.assertEqual(briefing._total(), (6, 7))
-        cliente, chamadas = _cliente_falso()
+        cliente, pedidos = _cliente_falso()
         briefing.compose(briefing.collect_house(ESTADOS), PREVISAO, [("EUA", ["Senado vota o orcamento"])], "pt", client=cliente)
-        sistema = chamadas[0]["system"]
-        self.assertIn("NO MAXIMO 190 palavras", sistema)
-        self.assertIn("Escolha por importancia, nao por volume. No total, somando todas as fontes, escolha entre 6 e 7 noticias", sistema)
-        self.assertIn("escolha no maximo 4", sistema)
-        self.assertIn("NAO fale do estado da casa", sistema)
+        pedido = pedidos[0]
+        self.assertEqual(pedido["max_words"], 190)
+        self.assertTrue(pedido["rules"].startswith("Escolha por importancia, nao por volume."))
+        self.assertEqual((pedido["total_min"], pedido["total_max"]), (6, 7))
+        self.assertEqual(pedido["candidates"], [{"source": "EUA", "limit": 4, "titles": ["Senado vota o orcamento"]}])
+        self.assertFalse(pedido["house_state"])
 
     def test_motor_de_voz_por_nome_ou_entidade(self) -> None:
         briefing.gravar_prefs(1, dict(PREFS_DO_CENTRO, tts_engine="tts.google_pt"))
@@ -1476,26 +1536,26 @@ class PreferenciasDoCentroTests(unittest.TestCase):
 
     def test_clima_desligado_tira_o_clima_da_fala_e_dos_cartoes(self) -> None:
         briefing.gravar_prefs(1, dict(PREFS_DO_CENTRO, weather=False))
-        cliente, chamadas = _cliente_falso()
+        cliente, pedidos = _cliente_falso()
         publicados, previsoes = [], []
         briefing.handle("bom dia", fetch_states_fn=lambda: ESTADOS, fetch_forecast_fn=lambda e: previsoes.append(e) or PREVISAO,
                         fetch_feed_fn=lambda url, n: [], publish_fn=lambda cartoes, d: publicados.append(cartoes) or True, client=cliente,
                         speak_fn=lambda *a: True, spawn_fn=lambda f: None)
-        self.assertNotIn("Clima agora", chamadas[0]["system"])
+        self.assertIsNone(pedidos[0]["facts"]["weather"])
         self.assertEqual(previsoes, [])
         self.assertNotIn("Clima", [c["titulo"] for c in publicados[0]])
 
     def test_pedido_automatico_fala_no_idioma_do_centro(self) -> None:
         briefing.gravar_prefs(1, dict(PREFS_DO_CENTRO, language="en", speaker="", house_state=True))
-        cliente, chamadas = _cliente_falso('{"speech": "Good morning.", "noticias": []}')
+        cliente, pedidos = _cliente_falso("Good morning.")
         with mock.patch.dict(os.environ, {"IQ_BRIEFING_SPEAKER": "", "IQ_BRIEFING_SATELLITE": ""}):
             briefing.handle("bom dia automatico", fetch_states_fn=lambda: ESTADOS, fetch_forecast_fn=lambda e: None, fetch_feed_fn=lambda u, n: [],
                             publish_fn=lambda c, d: True, client=cliente, spawn_fn=lambda f: None)
-        self.assertIn("ingles", chamadas[0]["system"].lower())
+        self.assertEqual(pedidos[0]["language"], "en")
 
     def test_testar_usa_o_formulario_so_nesta_thread_e_nao_fala_nem_grava(self) -> None:
         briefing.gravar_prefs(1, PREFS_DO_CENTRO)
-        cliente, chamadas = _cliente_falso('{"speech": "Bom dia, Victtor. Em Orlando, 24 graus.", "noticias": []}')
+        cliente, pedidos = _cliente_falso("Bom dia, Victtor. Em Orlando, 24 graus.")
         visto_em_outra_thread = []
         formulario = dict(PREFS_DO_CENTRO, max_words=80, rules="So economia.", sources=[{"name": "Teste", "url": "https://exemplo.com/a"}])
 
@@ -1515,9 +1575,9 @@ class PreferenciasDoCentroTests(unittest.TestCase):
         self.assertEqual(resposta["text"], "Bom dia, Victtor. Em Orlando, 24 graus.")
         self.assertEqual(resposta["words"], 7)
         self.assertGreaterEqual(resposta["speech_seconds"], 2)
-        self.assertIn("NO MAXIMO 80 palavras", chamadas[0]["system"])
-        self.assertIn("So economia.", chamadas[0]["system"])
-        self.assertIn("Manchetes candidatas (Teste", chamadas[0]["system"])
+        self.assertEqual(pedidos[0]["max_words"], 80)
+        self.assertTrue(pedidos[0]["rules"].startswith("So economia."))
+        self.assertEqual([f["source"] for f in pedidos[0]["candidates"]], ["Teste"])
         self.assertEqual([n for n, _ in visto_em_outra_thread[0]], ["EUA", "EUA", "Orlando", "Brasil"])  # o bom dia de verdade nao mudou
         self.assertEqual([n for n, _ in briefing.configured_feeds()], ["EUA", "EUA", "Orlando", "Brasil"])
         self.assertEqual(_ler_json(self.arquivo)["prefs"]["max_words"], 190)  # nada gravado
