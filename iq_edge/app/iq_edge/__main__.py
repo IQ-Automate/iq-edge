@@ -13,6 +13,9 @@ from .schedule import Preparer, Scheduler, ha_time_zone
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     log = logging.getLogger('iq_edge')
+    applied = settings.apply_briefing_options()  # the Bom dia's options -> IQ_BRIEFING_* before anything reads them
+    if applied:
+        log.info('Opções do Bom dia: %s.', ', '.join(applied))
     center = Center()
     briefing.usar_centro(center)  # the Bom dia's text by the center's AI (lote A5); the rule text when not paired
     scheduler = Scheduler(zone_name=lambda: center.time_zone or ha_time_zone(), preparer=Preparer())  # + the Bom dia prepared ahead

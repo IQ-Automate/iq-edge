@@ -1,4 +1,5 @@
-"""The add-on's tab in Home Assistant (ingress, port 8099): "Estado" (paired or not, last contact, version, Parear / Desparear) and
+"""The add-on's tab in Home Assistant (ingress, port 8099): "Estado" (paired or not, last contact, version, the center's AI for the Bom
+dia, the Bom dia prepared ahead, Home Assistant's event iq_bom_dia, Parear / Desparear) and
 "Bom dia" (sources, how many, total, words, rules, speaker among the home's media_player, volume, voice engine, language, unit, the
 automatic speech's time and days; "Testar" shows the text, "Salvar" keeps it here and sends it to the platform, "Falar agora").
 
@@ -16,7 +17,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-from . import briefing, prefs, relay, settings
+from . import briefing, prefs, ready, relay, schedule, settings
 
 logger = logging.getLogger('iq_edge.web')
 INGRESS = re.compile(r'/api/hassio_ingress/[A-Za-z0-9_-]{1,128}')
@@ -63,6 +64,17 @@ dt{color:var(--muted);font-size:13px}dd{margin:0}
 
 def _e(value):
     return html.escape(str(value if value is not None else ''), quote=True)
+
+
+def _hhmm(iso, zone_name=''):
+    """hh:mm of an ISO moment in the home's time zone (the machine's when it is not known); '—' when it cannot be read."""
+    try:
+        moment = datetime.fromisoformat(str(iso))
+    except ValueError:
+        return '—'
+    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    zone = schedule._zone(zone_name)
+    return (moment.astimezone(zone) if zone else moment.astimezone()).strftime('%H:%M')
 
 
 def _ago(iso, pt):
@@ -238,6 +250,7 @@ def make_handler(app):
                 body = (f'<section><h1>{self.t("Casa", "Home")}: {_e(info["home_name"])}</h1>{badge}<dl>'
                         + f'<dt>{self.t("Pareado em", "Paired on")}</dt><dd>{_e(str(info.get("paired_at") or "")[:10])}</dd>'
                         + f'<dt>{self.t("Último contato", "Last contact")}</dt><dd>{_e(_ago(info["last_contact"], self.pt()) if info.get("last_contact") else "—")}</dd>'
+                        + self.bom_dia_rows(info)
                         + f'<dt>{self.t("Plataforma", "Platform")}</dt><dd>{_e(info["center"])}</dd>'
                         + f'<dt>{self.t("Versão", "Version")}</dt><dd>{_e(info["version"])} · {_e(info["arch"])}</dd></dl>'
                         + f'<div class="actions"><a class="button" href="{_e(self.base())}/bom-dia">{self.t("Bom dia →", "Good morning →")}</a>'
@@ -259,6 +272,31 @@ def make_handler(app):
                     f'<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="9" required>'
                     f'<div class="actions"><button class="primary" type="submit">{self.t("Parear", "Pair")}</button></div></form></section>')
             return self.page(self.t('Estado', 'Status'), 'estado', box + warn + body)
+
+        def bom_dia_rows(self, info):
+            """"IA pelo centro: ok/sem resposta (última vez hh:mm)", "Bom dia preparado às hh:mm" or "ainda não preparado" and, inside
+            Home Assistant, whether the event iq_bom_dia is being heard."""
+            zone = app.center.time_zone or schedule.ha_time_zone()
+            if info.get('ai_ok') is None:
+                ai = self.t('ainda não usada', 'not used yet')
+            else:
+                ai = (self.t('ok', 'ok') if info['ai_ok'] else self.t('sem resposta', 'no answer')) \
+                    + self.t(f' (última vez {_hhmm(info.get("ai_at"), zone)})', f' (last time {_hhmm(info.get("ai_at"), zone)})')
+            data = ready.load()
+            if data and ready.age(data) < ready.MAX_AGE:
+                at = _hhmm(data.get('prepared_at'), zone)
+                prepared = self.t(f'preparado às {at}', f'prepared at {at}')
+            else:
+                prepared = self.t('ainda não preparado', 'not prepared yet')
+            rows = (f'<dt>{self.t("IA pelo centro", "AI by the platform")}</dt><dd>{_e(ai)}</dd>'
+                    f'<dt>{self.t("Bom dia", "Good morning")}</dt><dd>{_e(prepared)}</dd>')
+            if app.listener is not None:
+                state = app.listener.public().get('state')
+                heard = {'listening': ('ouvindo', 'listening'),
+                         'auth_failed': ('o Home Assistant recusou o acesso', 'Home Assistant refused the access')}.get(
+                    state, ('sem conexão com o Home Assistant', 'no connection to Home Assistant'))
+                rows += f'<dt>{self.t("Evento iq_bom_dia", "Event iq_bom_dia")}</dt><dd>{_e(self.t(*heard))}</dd>'
+            return rows
 
         def pair(self, form):
             ok, reason = app.center.pair((form.get('code') or [''])[0])

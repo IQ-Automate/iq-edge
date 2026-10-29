@@ -97,5 +97,6 @@ def speak_now(language=None):
         return False, ''
     language = language if language in ('pt', 'en') else briefing.idioma_automatico()
     text = briefing.handle('bom dia automatico', idioma_pedido=language, pronto=ready.fresh(language)) or ''
-    set_state(last_spoken_at=datetime.now(timezone.utc).isoformat(timespec='seconds'))
+    if text != briefing._T[language]['falha_casa']:  # Home Assistant answered: the preparation of this morning can stop
+        set_state(last_spoken_at=datetime.now(timezone.utc).isoformat(timespec='seconds'))
     return True, text

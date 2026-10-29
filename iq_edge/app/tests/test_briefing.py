@@ -328,9 +328,8 @@ class NoticiasImportantesTest(unittest.TestCase):
         cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
         with mock.patch.dict(os.environ, {"IQ_BRIEFING_NEWS_RULES": "So esporte, nada alem disso.", "IQ_BRIEFING_TOTAL": "2-3"}):
             briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
-        self.assertTrue(pedidos[0]["rules"].startswith("So esporte, nada alem disso. No total"))
-        self.assertIn("entre 2 e 3 noticias", pedidos[0]["rules"])
-        self.assertNotIn("plantao de telejornal", pedidos[0]["rules"])
+        self.assertEqual(pedidos[0]["rules"], "So esporte, nada alem disso.")
+        self.assertEqual((pedidos[0]["total_min"], pedidos[0]["total_max"]), (2, 3))  # o total vai nos campos do contrato
 
     def test_tamanho_maximo_configuravel_e_limitado(self) -> None:
         cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
@@ -344,7 +343,22 @@ class NoticiasImportantesTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"IQ_BRIEFING_NEWS_RULES": "x" * 5000, "IQ_BRIEFING_TOTAL": "4-5"}):
             briefing.compose(self.dados, PREVISAO, self.CANDIDATAS, "pt", client=cliente)
         self.assertEqual(len(pedidos[0]["rules"]), 2000)
-        self.assertIn("entre 4 e 5 noticias", pedidos[0]["rules"])  # o total pedido nunca se perde
+        self.assertEqual((pedidos[0]["total_min"], pedidos[0]["total_max"]), (4, 5))  # o total pedido nunca se perde
+
+    def test_limites_do_centro_sao_cortados_antes_de_enviar(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
+        dados = {"pessoas": ["N" * 100] * 25, "abertos": ["A" * 200] * 70, "alarme": "estado_de_alarme_muito_longo_" * 3,
+                 "clima": {"condicao": "c" * 90, "temperatura": 20.0, "unidade": "°C"}}
+        briefing.compose(dados, None, [], "pt", client=cliente)
+        fatos = pedidos[0]["facts"]
+        self.assertEqual((len(fatos["names"]), max(map(len, fatos["names"]))), (20, 80))
+        self.assertEqual((len(fatos["open"]), max(map(len, fatos["open"]))), (60, 120))
+        self.assertEqual((len(fatos["alarm"]), len(fatos["weather"]["condition"])), (40, 40))
+        self.assertNotIn("total_min", pedidos[0])  # sem total pedido, os campos opcionais nao vao
+        sem_unidade = {"clima": {"condicao": "rainy", "temperatura": 20.0, "unidade": ""}}
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_TEMP_UNIT": ""}):
+            briefing.compose(sem_unidade, None, [], "pt", client=cliente)
+        self.assertIsNone(pedidos[1]["facts"]["weather"])  # unidade so "C" ou "F": sem ela, o clima nao vai
 
     def test_corpo_grande_fica_abaixo_de_64_kb_e_os_indices_continuam_valendo(self) -> None:
         candidatas = [(f"Fonte {i}", [f"{i}-{j} " + "manchete longa " * 30 for j in range(40)]) for i in range(25)]
@@ -1458,8 +1472,8 @@ class PreferenciasDoCentroTests(unittest.TestCase):
         briefing.compose(briefing.collect_house(ESTADOS), PREVISAO, [("EUA", ["Senado vota o orcamento"])], "pt", client=cliente)
         pedido = pedidos[0]
         self.assertEqual(pedido["max_words"], 190)
-        self.assertTrue(pedido["rules"].startswith(
-            "Escolha por importancia, nao por volume. No total, somando todas as fontes, escolha entre 6 e 7 noticias"))
+        self.assertTrue(pedido["rules"].startswith("Escolha por importancia, nao por volume."))
+        self.assertEqual((pedido["total_min"], pedido["total_max"]), (6, 7))
         self.assertEqual(pedido["candidates"], [{"source": "EUA", "limit": 4, "titles": ["Senado vota o orcamento"]}])
         self.assertFalse(pedido["house_state"])
 

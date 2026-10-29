@@ -1,5 +1,5 @@
 name: IQ Edge
-version: "0.1.0"
+version: "0.2.0"
 slug: iq_edge
 description: Conecta esta casa à plataforma IQ Autom8 (pareamento por código) e traz o Bom dia editável na aba IQ.
 url: https://github.com/IQ-Automate/iq-edge
@@ -21,3 +21,14 @@ options:
 schema:
   center_url: url
   pairing_code: str?
+  weather_entity: 'match(^weather\.[a-z0-9_]+$)?'
+  temp_sensor: 'match(^sensor\.[a-z0-9_]+$)?'
+  satellite: 'match(^assist_satellite\.[a-z0-9_]+$)?'
+  tts_voice: str(0,200)?
+  tts_voice_en: str(0,200)?
+  speaker_delay: float(0,15)?
+  speaker_wait: float(0,30)?
+  speaker_busy: list(voice|interrupt)?
+  card_seconds: int(10,300)?
+  prepare_minutes: int(0,180)?
+  prepare_at: 'match(^([01][0-9]|2[0-3]):[0-5][0-9]$)?'

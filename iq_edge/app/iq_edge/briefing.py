@@ -1027,19 +1027,21 @@ def _alarme_dito(estado: str | None, idioma: str) -> str | None:
 
 
 def _regras_e_palavras(idioma: str) -> tuple[str, int]:
-    """O criterio de importancia (as regras do centro/.env, ou o padrao, mais o total pedido) e o maximo de palavras."""
+    """O criterio de importancia (as regras do centro/.env, ou o padrao) e o maximo de palavras. O total de noticias vai a
+    parte (total_min/total_max do contrato)."""
     t = _T[idioma]
     try:
         palavras = int(_pref("max_words") or os.getenv("IQ_BRIEFING_MAX_WORDS", "") or t["palavras"])
     except ValueError:
         palavras = t["palavras"]
     regras = (_pref("rules") or os.getenv("IQ_BRIEFING_NEWS_RULES", "") or "").strip() or _REGRAS_NOTICIAS_PADRAO
-    total = _total()
-    extra = (
-        f" No total, somando todas as fontes, escolha entre {total[0]} e {total[1]} noticias"
-        " (menos, se nao houver o que valha)."
-    ) if total else ""
-    return regras[: 2000 - len(extra)] + extra, max(40, min(300, palavras))
+    return regras[:2000], max(40, min(300, palavras))
+
+
+def _curto(valor: Any, limite: int) -> str | None:
+    """Texto do pedido ao centro cortado no limite do contrato (o centro recusa com 422 o que passa); None se vazio."""
+    texto = str(valor or "").strip()
+    return texto[:limite] or None
 
 
 def pedido_ia(
@@ -1055,21 +1057,26 @@ def pedido_ia(
     houver; aberto e alarme so com o estado da casa ligado; manchetes candidatas por fonte (ate 20 fontes, 30 titulos de
     ate 300 caracteres) com o limite de cada uma; fonte sem titulo ou com limite 0 nao vai. Acima de ~60 KB, saem os
     ultimos titulos das fontes mais longas (os indices continuam valendo: so o fim da lista sai). `preparo` (o Bom dia
-    preparado antes): sem nomes e sem a casa, que entram na hora de falar."""
+    preparado antes): sem nomes e sem a casa, que entram na hora de falar. Limites do centro (cortados aqui para nunca
+    receber 422): ate 20 nomes de 80 caracteres, 60 itens abertos de 120, clima e alarme de 40, unidade so "C"/"F" (sem
+    unidade conhecida, o clima nao vai), `limit` 0 a 6, regras 2000, palavras 40 a 300, total 1 a 20."""
     casa = _casa_ligada() and not preparo
     clima = None
     if dados.get("clima"):
         c = _clima_resumido(dados, previsao, idioma)
-        clima = {
-            "temp": c["temp"] or None,
-            "unit": _letra_da_unidade(c["u"]) or None,
-            "temp2": c["temp2"] or None,
-            "unit2": (_letra_da_unidade(c["u2"]) or None) if c["temp2"] else None,
-            "condition": c["cond"],
-            "high": c["hi"] or None,
-            "low": c["lo"] or None,
-            "rain": c["chuva"] or None,
-        }
+        unidade = _letra_da_unidade(c["u"])
+        if unidade in ("C", "F"):
+            segunda = _letra_da_unidade(c["u2"]) if c["temp2"] else ""
+            clima = {
+                "temp": _curto(c["temp"], 40),
+                "unit": unidade,
+                "temp2": _curto(c["temp2"], 40) if segunda in ("C", "F") else None,
+                "unit2": segunda if segunda in ("C", "F") else None,
+                "condition": _curto(c["cond"], 40),
+                "high": _curto(c["hi"], 40),
+                "low": _curto(c["lo"], 40),
+                "rain": _curto(c["chuva"], 40),
+            }
     regras, palavras = _regras_e_palavras(idioma)
     pedido: dict[str, Any] = {
         "language": idioma,
@@ -1077,17 +1084,21 @@ def pedido_ia(
         "rules": regras,
         "house_state": casa,
         "facts": {
-            "names": [] if preparo else [str(n) for n in (dados.get("pessoas") or [])][:20],
+            "names": [] if preparo else [n for n in (_curto(p, 80) for p in dados.get("pessoas") or []) if n][:20],
             "weather": clima,
-            "open": [str(a) for a in (dados.get("abertos") or [])][:20] if casa else [],
-            "alarm": _alarme_dito(dados.get("alarme"), idioma) if casa else None,
+            "open": [a for a in (_curto(x, 120) for x in dados.get("abertos") or []) if a][:60] if casa else [],
+            "alarm": _curto(_alarme_dito(dados.get("alarme"), idioma), 40) if casa else None,
         },
         "candidates": [
-            {"source": nome, "limit": limites[nome], "titles": [str(t)[:300] for t in titulos[:30]]}
+            {"source": nome, "limit": max(0, min(6, limites[nome])), "titles": [str(t)[:300] for t in titulos[:30]]}
             for nome, titulos in candidatas
             if titulos and limites.get(nome)
         ][:20],
     }
+    total = _total()
+    if total:
+        menor, maior = max(1, min(20, total[0])), max(1, min(20, total[1]))
+        pedido["total_min"], pedido["total_max"] = min(menor, maior), maior
     while pedido["candidates"] and len(json.dumps(pedido)) > _LIMITE_PEDIDO:
         maior = max(pedido["candidates"], key=lambda fonte: len(fonte["titles"]))
         maior["titles"].pop()

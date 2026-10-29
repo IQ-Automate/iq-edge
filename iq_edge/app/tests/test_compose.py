@@ -43,14 +43,14 @@ class ComposeTests(ComposeCase):
                          ('Bearer ' + 'C' * 43, 'home-1', '2'))
         self.assertLessEqual(sent['size'], 64 * 1024)
         body = sent['body']
-        self.assertEqual(set(body), {'language', 'max_words', 'rules', 'house_state', 'facts', 'candidates'})
+        self.assertEqual(set(body), {'language', 'max_words', 'rules', 'house_state', 'facts', 'candidates', 'total_min', 'total_max'})
         self.assertEqual((body['language'], body['max_words'], body['house_state']), ('pt', 120, True))
         self.assertEqual(set(body['facts']), {'names', 'weather', 'open', 'alarm'})
         self.assertEqual((body['facts']['names'], body['facts']['weather'], body['facts']['open'], body['facts']['alarm']),
                          (['Franco'], None, [], None))  # weather off in these prefs; nothing open; no alarm
         self.assertEqual(body['candidates'], [{'source': 'Cidade', 'limit': 2,
                                                'titles': ['Prefeitura anuncia obras na avenida', 'Chuva forte prevista para a tarde']}])
-        self.assertIn('total', body['rules'].lower())
+        self.assertEqual((body['total_min'], body['total_max']), (1, 2))  # the prefs' total of headlines
         # the cards use the center's pick (index 1), the speech is the center's text
         self.center.compose_answer = (200, PICKS, {})
         spoken, cards = self.speak()

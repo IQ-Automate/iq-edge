@@ -19,8 +19,8 @@ Depois instale **IQ Edge** e siga a aba **Documentação** do app.
 ## Desenvolvimento
 
 O pacote Python fica em `iq_edge/app/iq_edge` (só `requests`, `PyYAML` e a biblioteca padrão). Ele roda fora do Home Assistant com
-variáveis de ambiente (`HA_URL`, `HA_TOKEN`, `IQ_CENTER_URL`, `IQ_DATA_DIR`, `IQ_PAIRING_CODE`). Testes, com centro e Home Assistant
-falsos (nada sai da máquina):
+variáveis de ambiente (`HA_URL`, `HA_TOKEN`, `IQ_CENTER_URL`, `IQ_DATA_DIR`, `IQ_PAIRING_CODE`, `IQ_HA_WS_URL`). Testes, com
+centro, Home Assistant e websocket falsos (nada sai da máquina):
 
 ```
 cd iq_edge/app
