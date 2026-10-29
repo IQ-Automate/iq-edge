@@ -1066,17 +1066,23 @@ def pedido_ia(
         c = _clima_resumido(dados, previsao, idioma)
         unidade = _letra_da_unidade(c["u"])
         if unidade in ("C", "F"):
-            segunda = _letra_da_unidade(c["u2"]) if c["temp2"] else ""
+            segunda = _letra_da_unidade(c["u2"])  # so no modo FC (as duas unidades)
+            segunda = segunda if segunda in ("C", "F") and (c["temp2"] or c["hi2"] or c["lo2"]) else ""
             clima = {
                 "temp": _curto(c["temp"], 40),
                 "unit": unidade,
-                "temp2": _curto(c["temp2"], 40) if segunda in ("C", "F") else None,
-                "unit2": segunda if segunda in ("C", "F") else None,
+                "temp2": _curto(c["temp2"], 40) if segunda else None,
+                "unit2": segunda or None,
                 "condition": _curto(c["cond"], 40),
                 "high": _curto(c["hi"], 40),
                 "low": _curto(c["lo"], 40),
                 "rain": _curto(c["chuva"], 40),
+                # false = modo "pelo idioma": a fala diz so "graus" (cada palavra custa credito de voz)
+                "say_unit": not _unidade_implicita(),
             }
+            for campo, valor in (("high2", c["hi2"]), ("low2", c["lo2"])):
+                if segunda and _curto(valor, 40):
+                    clima[campo] = _curto(valor, 40)
     regras, palavras = _regras_e_palavras(idioma)
     pedido: dict[str, Any] = {
         "language": idioma,
@@ -1107,6 +1113,16 @@ def pedido_ia(
     return pedido
 
 
+def _juntar_homonimas(candidatas: list[tuple[str, list[str]]]) -> list[tuple[str, list[str]]]:
+    """Fontes com o mesmo nome (sem diferenca de maiusculas) viram uma so, com os titulos somados na ordem e sem repetir:
+    o pedido leva uma fonte por nome e os `picks` (um por nome) se aplicam a ela."""
+    juntas: dict[str, tuple[str, list[str]]] = {}
+    for nome, titulos in candidatas:
+        lista = juntas.setdefault(str(nome).strip().lower(), (nome, []))[1]
+        lista.extend(t for t in titulos if t not in lista)
+    return list(juntas.values())
+
+
 _SAUDACAO_NO_COMECO = re.compile(r"^\s*(?:bom dia|good morning)\b[\s,;:!.\-]*", re.IGNORECASE)
 
 
@@ -1128,6 +1144,7 @@ def compose(
     """Devolve (fala, noticias escolhidas). Com o centro, a IA de la escolhe as importantes e
     escreve a fala; sem ele (ou com qualquer erro), vale o filtro por regra e o texto por regra.
     `preparo`: a fala sem cumprimento e sem a casa (o Bom dia preparado; prefixo_da_hora completa na hora)."""
+    candidatas = _juntar_homonimas(candidatas)
     limites = _limites_por_fonte([nome for nome, _ in candidatas])
     por_regra = [(nome, filtrar_por_regra(titulos)[: limites[nome]]) for nome, titulos in candidatas]
     fallback = build_spoken_fallback(dados, previsao, por_regra, idioma, preparo=preparo)

@@ -165,7 +165,9 @@ plataforma mais `schedule` `{time: "HH:MM", days: [0..6]}` (0 = segunda).
 `briefing-compose` (0.2.0): uma tentativa, até 45 s (dentro de uma tarefa `preview`, termina antes do prazo dela). Qualquer erro
 vira o texto por regra; o log guarda só o motivo curto (`rate`, `no_key`...), nunca o corpo. O add-on corta os campos nos
 limites do centro antes de enviar (20 fontes, 30 títulos de 300 caracteres, 20 nomes de 80, 60 itens abertos de 120, clima e
-alarme de 40, unidade só `C`/`F`) e manda `total_min`/`total_max` quando o Bom dia tem total de notícias. O Bom dia preparado manda `names`
+alarme de 40, unidade só `C`/`F`) e manda `total_min`/`total_max` quando o Bom dia tem total de notícias. Em `facts.weather`
+vão também `say_unit` (`false` no modo de unidade pelo idioma: a fala diz só "graus") e, com as duas unidades, `high2`/`low2`.
+Fontes com o mesmo nome vão juntas, como uma fonte só. O Bom dia preparado manda `names`
 vazio e `house_state: false`: o cumprimento e a casa entram na hora da fala.
 
 ## English

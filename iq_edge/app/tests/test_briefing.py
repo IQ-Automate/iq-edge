@@ -374,6 +374,15 @@ class NoticiasImportantesTest(unittest.TestCase):
         self.assertEqual(dict(escolhidas)["Fonte 0"], esperado)  # 39 nunca foi enviado: descartado
         self.assertEqual(dict(escolhidas)["Fonte 24"], [])  # fonte que nao foi ao centro fica sem noticia
 
+    def test_fontes_homonimas_viram_uma_e_os_picks_valem_por_nome(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": [{"source": "EUA", "indices": [3, 0]}, {"source": "Brasil", "indices": []}]})
+        candidatas = [("EUA", ["NPR um", "NPR dois"]), ("Brasil", ["G1 um"]), ("eua", ["BBC um", "NPR dois", "BBC dois"])]
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_PICK_MAP": "EUA=3"}):
+            _, escolhidas = briefing.compose(self.dados, PREVISAO, candidatas, "pt", client=cliente)
+        self.assertEqual([(f["source"], f["titles"]) for f in pedidos[0]["candidates"]],
+                         [("EUA", ["NPR um", "NPR dois", "BBC um", "BBC dois"]), ("Brasil", ["G1 um"])])
+        self.assertEqual(escolhidas, [("EUA", ["BBC dois", "NPR um"]), ("Brasil", [])])
+
     def test_fonte_sem_titulo_ou_com_limite_zero_nao_vai(self) -> None:
         cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
         with mock.patch.dict(os.environ, {"IQ_BRIEFING_PICK_MAP": "EUA=0"}):
@@ -438,7 +447,8 @@ class DuasUnidadesTest(unittest.TestCase):
         cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
         briefing.compose(self.DADOS_C, self.PREV_C, [], "pt", client=cliente)
         self.assertEqual(pedidos[0]["facts"]["weather"], {"temp": "77", "unit": "F", "temp2": "25", "unit2": "C", "condition": "chuva",
-                                                           "high": "84", "low": "72", "rain": "60"})
+                                                           "high": "84", "low": "72", "rain": "60", "say_unit": True,
+                                                           "high2": "29", "low2": "22"})
 
     def test_modo_f_continua_so_fahrenheit(self) -> None:
         self._com("F")
@@ -460,7 +470,7 @@ class IaTest(unittest.TestCase):
         self.assertEqual(pedido["facts"], {
             "names": ["Victtor", "Matheus"],  # nomes exatos, como no HA
             "weather": {"temp": "78", "unit": "F", "temp2": None, "unit2": None, "condition": "chuva",
-                        "high": "84", "low": "71", "rain": "62"},
+                        "high": "84", "low": "71", "rain": "62", "say_unit": True},
             "open": ["Portão da garagem"],
             "alarm": "desarmado",
         })
@@ -1140,6 +1150,8 @@ class UnidadePeloIdiomaTest(unittest.TestCase):
         briefing.compose(self.DADOS_F, self.PREV_F, [], "pt", client=cliente)
         clima = pedidos[0]["facts"]["weather"]
         self.assertEqual((clima["temp"], clima["unit"], clima["temp2"], clima["unit2"], clima["high"]), ("25", "C", None, None, "29"))
+        self.assertIs(clima["say_unit"], False)  # pelo idioma: a fala diz so "graus"
+        self.assertNotIn("high2", clima)
         briefing.compose(self.DADOS_C, self.PREV_C, [], "en", client=cliente)
         clima = pedidos[1]["facts"]["weather"]
         self.assertEqual((clima["temp"], clima["unit"], clima["temp2"], clima["unit2"]), ("77", "F", None, None))
@@ -1174,7 +1186,7 @@ class UnidadeFalada(unittest.TestCase):
         with mock.patch.dict(os.environ, {"IQ_BRIEFING_TEMP_UNIT": "C"}):
             briefing.compose(self.DADOS, None, [], "pt", client=cliente)
         self.assertEqual(pedidos[0]["facts"]["weather"], {"temp": "25", "unit": "C", "temp2": None, "unit2": None, "condition": "chuva",
-                                                          "high": None, "low": None, "rain": None})
+                                                          "high": None, "low": None, "rain": None, "say_unit": True})
 
 
 class SensorDeTemperaturaTest(unittest.TestCase):
