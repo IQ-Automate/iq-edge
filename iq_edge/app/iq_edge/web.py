@@ -68,21 +68,18 @@ def _e(value):
 
 def _hhmm(iso, zone_name=''):
     """hh:mm of an ISO moment in the home's time zone (the machine's when it is not known); '—' when it cannot be read."""
-    try:
-        moment = datetime.fromisoformat(str(iso))
-    except ValueError:
+    moment = settings.parse_time(iso)
+    if moment is None:
         return '—'
-    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
     zone = schedule._zone(zone_name)
     return (moment.astimezone(zone) if zone else moment.astimezone()).strftime('%H:%M')
 
 
 def _ago(iso, pt):
-    try:
-        moment = datetime.fromisoformat(str(iso))
-    except ValueError:
+    moment = settings.parse_time(iso)
+    if moment is None:
         return '—'
-    minutes = max(0, int((datetime.now(timezone.utc) - (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc))).total_seconds() // 60))
+    minutes = max(0, int((datetime.now(timezone.utc) - moment).total_seconds() // 60))
     if minutes < 1:
         return 'agora' if pt else 'just now'
     if minutes < 60:
@@ -282,8 +279,8 @@ def make_handler(app):
             else:
                 ai = (self.t('ok', 'ok') if info['ai_ok'] else self.t('sem resposta', 'no answer')) \
                     + self.t(f' (última vez {_hhmm(info.get("ai_at"), zone)})', f' (last time {_hhmm(info.get("ai_at"), zone)})')
-            data = ready.load()
-            if data and ready.age(data) < ready.MAX_AGE:
+            data = ready.fresh(briefing.idioma_automatico())  # the same check as speak_now: "preparado" only when it will be used
+            if data:
                 at = _hhmm(data.get('prepared_at'), zone)
                 prepared = self.t(f'preparado às {at}', f'prepared at {at}')
             else:

@@ -52,12 +52,7 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
-def _parse(value):
-    try:
-        moment = datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+_parse = settings.parse_time
 
 
 def _digest(value):
@@ -178,8 +173,12 @@ class Center:
         token = settings.ha_token()
         if not token:
             return
-        options = settings.options()  # the Supervisor replaces ALL the options: the others (Bom dia's) go back as they are
-        body = {'options': dict(options, center_url=str(options.get('center_url') or settings.DEFAULT_CENTER), pairing_code='')}
+        stored = settings.file_options()  # the Supervisor replaces ALL the options: the others (Bom dia's) go back as they are
+        if stored is None:  # without them, a write would erase every option: the (used) code stays there instead
+            logger.warning('Não consegui ler as opções do add-on; o código de pareamento fica nelas (ele já não vale).')
+            return
+        center = str(settings.options().get('center_url') or settings.DEFAULT_CENTER)
+        body = {'options': dict(stored, center_url=center, pairing_code='')}
         try:
             self.session.post(settings.supervisor_url() + '/addons/self/options', json=body, timeout=10, allow_redirects=False,
                               headers={'Authorization': 'Bearer ' + token})

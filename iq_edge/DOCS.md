@@ -67,12 +67,14 @@ O add-on lê as notícias, o clima e pede o texto à IA antes da hora. Assim a f
 - Com **Fala automática** ligada: ele prepara 30 minutos antes do horário (opção `prepare_minutes`).
 - Sem **Fala automática**, numa casa que usa o evento `iq_bom_dia`: ele prepara a partir das 06:00 (opção `prepare_at`). Ele só
   faz isso depois que o evento chegou uma vez nos últimos 14 dias.
-- Ele prepara de novo a cada 30 minutos até o Bom dia ser falado, e para 4 horas depois do horário.
+- Ele prepara uma vez no começo. Até o Bom dia ser falado, ele prepara de novo só quando o texto passa de 90 minutos, no
+  máximo 2 vezes. Ele para 4 horas depois do horário e apaga o texto preparado.
+- Um horário logo depois da meia-noite (por exemplo, 00:10) é preparado na noite anterior.
 - Quem está em casa e o que está aberto (portas, janelas e alarme) não entram no texto preparado. Eles entram na hora da fala,
   com frases fixas, para nunca ficarem velhos.
 - Um texto preparado vale por 2 horas. Depois disso, ou se você mudou o Bom dia, o add-on monta o texto na hora, como antes.
-- Depois de preparar, o add-on pede ao Home Assistant para gerar o áudio da voz e guardar em cache. Nada toca nessa hora.
-  Se a casa não mudou até a fala, o áudio já está pronto.
+- Quando o texto preparado muda, o add-on pede ao Home Assistant para gerar o áudio da voz e guardar em cache. Nada toca
+  nessa hora. Se a casa não mudou até a fala, o áudio já está pronto.
 - `prepare_minutes: 0` desliga a preparação.
 
 ## Bom dia por uma automação do Home Assistant (evento `iq_bom_dia`)

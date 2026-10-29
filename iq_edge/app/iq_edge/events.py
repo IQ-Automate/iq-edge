@@ -206,6 +206,7 @@ class Listener:
         self.lock = threading.Lock()
         self.failures = 0
         self.last_spoken = None
+        self.speaking = False
         self.socket = None
         self.status = {'state': 'off', 'last_event': None}
 
@@ -218,29 +219,41 @@ class Listener:
             self.status.update(values)
 
     def on_event(self, data):
-        """One `iq_bom_dia`: speak now (in the background), unless the last one was less than COOLDOWN seconds ago. True = speaking."""
+        """One `iq_bom_dia`: speak now (in the background), unless one is being spoken now or the last successful one was less than
+        COOLDOWN seconds ago (a failed speech never blocks the next event). True = speaking."""
         language = data.get('language') if isinstance(data, dict) else None
         language = language if language in ('pt', 'en') else None
         now = self.clock()
         with self.lock:
-            if self.last_spoken is not None and now - self.last_spoken < COOLDOWN:
+            self.status['last_event'] = _now_iso()
+            if self.speaking or (self.last_spoken is not None and now - self.last_spoken < COOLDOWN):
                 logger.info('Evento iq_bom_dia repetido em menos de 1 minuto: ignorado.')
                 return False
-            self.last_spoken = now
-            self.status['last_event'] = _now_iso()
+            self.speaking = True
         try:
             prefs.set_state(last_event_at=_now_iso())
         except OSError:
             pass
 
         def job():
+            spoken = False
             try:
                 spoken, _ = self.speak(language)
                 logger.info('Bom dia pelo evento do Home Assistant: %s.',
                             'falando' if spoken else 'sem alto-falante (nem satélite) escolhido')
             except Exception:
                 logger.exception('Erro no Bom dia pelo evento do Home Assistant.')
-        self.spawn(job)
+            finally:
+                with self.lock:
+                    self.speaking = False
+                    if spoken:
+                        self.last_spoken = self.clock()
+        try:
+            self.spawn(job)
+        except BaseException:
+            with self.lock:
+                self.speaking = False
+            raise
         return True
 
     def listen(self):
@@ -296,9 +309,9 @@ class Listener:
             try:
                 self.listen()
             except AuthFailed:
-                self._set(state='auth_failed')
-                if self.failures == 0:
+                if self.public()['state'] != 'auth_failed':  # every time it becomes refused (not on each retry)
                     logger.warning('O Home Assistant recusou o token do add-on no websocket; tentando de novo.')
+                self._set(state='auth_failed')
             except (OSError, WebSocketError) as error:
                 self._set(state='offline')
                 if self.failures == 0:

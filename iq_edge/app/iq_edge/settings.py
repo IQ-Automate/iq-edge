@@ -21,6 +21,7 @@ import json
 import os
 import platform
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -53,8 +54,27 @@ def data_dir():
     return Path(os.getenv('IQ_DATA_DIR') or '/data')
 
 
+def parse_time(value):
+    """An ISO moment as an aware datetime (UTC when it carries no zone); None when it cannot be read."""
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def file_options():
+    """/data/options.json exactly as the Supervisor wrote it; None when it cannot be read (then nothing may be written back:
+    the Supervisor replaces all the options at once)."""
+    try:
+        data = json.loads((data_dir() / 'options.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def options():
-    """The add-on's options (center_url, pairing_code); the environment wins (tests)."""
+    """The add-on's options (center_url, pairing_code, the Bom dia's); the environment wins (tests)."""
     try:
         data = json.loads((data_dir() / 'options.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):

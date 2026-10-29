@@ -1123,12 +1123,25 @@ def _juntar_homonimas(candidatas: list[tuple[str, list[str]]]) -> list[tuple[str
     return list(juntas.values())
 
 
-_SAUDACAO_NO_COMECO = re.compile(r"^\s*(?:bom dia|good morning)\b[\s,;:!.\-]*", re.IGNORECASE)
+_SAUDACAO = r"(?:bom dia|good morning|ol[aá]|oi|hello|hi|hey)\b"
+_FRASE_DE_SAUDACAO = re.compile(r"^\s*" + _SAUDACAO + r"[^.!?]*[.!?]+\s*", re.IGNORECASE)
+_SAUDACAO_NO_COMECO = re.compile(r"^\s*" + _SAUDACAO + r"[\s,;:!.\-]*", re.IGNORECASE)
 
 
 def _sem_saudacao(texto: str) -> str:
-    """O texto da IA para o Bom dia preparado sem o "Bom dia" do comeco (o cumprimento com os nomes entra na hora)."""
-    resto = _SAUDACAO_NO_COMECO.sub("", texto, count=1).strip()
+    """O texto da IA para o Bom dia preparado sem a frase de saudacao do comeco ("Bom dia a todos!", "Ola! Bom dia.": tudo
+    ate o primeiro ponto ou exclamacao; o cumprimento com os nomes entra na hora). Uma primeira frase longa (mais de 8
+    palavras) tem conteudo: sai so a palavra da saudacao. Texto que nao comeca com saudacao fica como esta."""
+    resto = texto.strip()
+    for _ in range(2):  # "Ola! Bom dia. Hoje..."
+        frase = _FRASE_DE_SAUDACAO.match(resto)
+        if frase is None:
+            resto = _SAUDACAO_NO_COMECO.sub("", resto, count=1).strip()  # saudacao sem ponto: so a palavra sai
+            break
+        if len(frase.group(0).split()) > 8:
+            resto = _SAUDACAO_NO_COMECO.sub("", resto, count=1).strip()
+            break
+        resto = resto[frase.end():].strip()
     return resto[:1].upper() + resto[1:]
 
 

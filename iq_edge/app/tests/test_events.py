@@ -74,6 +74,27 @@ class EventTests(ListenerCase):
         self.assertTrue(prefs.state().get('last_event_at'))
         self.assertTrue(self.listener.public()['last_event'])
 
+    def test_a_failed_speech_never_blocks_the_next_event(self):
+        self.subscribed()
+        results = [(False, ''), RuntimeError('boom'), (True, 'Um instante.')]
+
+        def speak(language=None):
+            self.spoken.append(language)
+            self.said.set()
+            result = results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        self.listener.speak = speak
+        with self.assertLogs('iq_edge.events', level='INFO'):
+            for count in (1, 2, 3):
+                self.ws.fire({})
+                self.heard(count)  # the same minute: the earlier ones did not speak, so this one goes
+        self.ws.fire({})  # now one spoke: a repeat within the minute is ignored
+        self.ws.ping_frame()
+        self.assertTrue(self.ws.wait(lambda ws: ws.pongs == [b'hi']))
+        self.assertEqual(len(self.spoken), 3)
+
     def test_home_assistants_ping_after_a_silence_keeps_the_connection(self):
         self.subscribed()
         self.assertTrue(self.ws.wait(lambda ws: any(m.get('type') == 'ping' for m in ws.received), 3))
@@ -103,6 +124,24 @@ class RefusedTokenTests(ListenerCase):
         self.assertEqual(self.ws.subscriptions, [])
         self.assertTrue(self.until(lambda: self.listener.public()['state'] == 'auth_failed'))
         self.assertEqual(self.spoken, [])
+
+
+class RefusedTokenLogTests(unittest.TestCase):
+    def test_the_refusal_is_logged_each_time_it_becomes_refused(self):
+        listener = events.Listener(url='ws://127.0.0.1:9/core/websocket', token='wrong-token', backoff=(0,))
+        outcomes = [events.AuthFailed('auth'), events.AuthFailed('auth'), events.WebSocketError('closed'), events.AuthFailed('auth'),
+                    events.AuthFailed('auth')]
+
+        def listen():
+            if len(outcomes) == 1:
+                listener.stop.set()
+            raise outcomes.pop(0)
+        listener.listen = listen
+        with self.assertLogs('iq_edge.events', level='INFO') as logs:
+            listener.run()
+        refused = [line for line in logs.output if 'recusou o token' in line]
+        self.assertEqual(len(refused), 2)  # refused, (refused again: quiet), offline, refused again: logged
+        self.assertFalse(any('wrong-token' in line for line in logs.output))
 
 
 class NoServerTests(unittest.TestCase):

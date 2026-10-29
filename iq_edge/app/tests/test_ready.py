@@ -1,7 +1,8 @@
-"""Lote A5, the Bom dia prepared ahead (ready.py + schedule.Preparer) against the FAKE center and HA: prepared at the right time
-(a fake clock), renewed every 30 minutes until spoken, discarded 4 h after the time; the speech uses the prepared text (no feed, no AI
-at that moment) when it is under 2 hours old, with the greeting and the house added at the time of speech; the voice is cached
-ahead with tts_get_url once, and its failure is ignored."""
+"""Lote A5, the Bom dia prepared ahead (ready.py + schedule.Preparer) against the FAKE center and HA: prepared once at the right
+time (a fake clock, also across midnight), renewed only after 90 minutes and at most twice, never after it was spoken, discarded
+at the end of its window; the speech uses the prepared text (no feed, no AI at that moment) when it is under 2 hours old, with the
+greeting and the house added at the time of speech; the voice is cached ahead with tts_get_url only when the text changed, and its
+failure is ignored."""
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,22 @@ class ReadyCase(EdgeCase):
     def feeds_read(self):
         return len(self.ha.requests_to('/rss'))
 
+    def status_page(self):
+        """The tab's Estado page as the Supervisor's proxy would get it."""
+        from http.client import HTTPConnection
+        from iq_edge import web
+        with mock.patch.dict(os.environ, {'IQ_INGRESS_PEERS': '127.0.0.1'}):
+            server = web.start(web.App(self.edge), host='127.0.0.1', port=0)
+            try:
+                connection = HTTPConnection('127.0.0.1', server.server_port, timeout=30)
+                connection.request('GET', '/', headers={'X-Ingress-Path': '/api/hassio_ingress/abc', 'X-Remote-User-Id': 'u'})
+                text = connection.getresponse().read().decode('utf-8')
+                connection.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+        return text
+
 
 class WindowTests(EdgeCase):
     def test_the_window_of_the_day(self):
@@ -43,6 +60,18 @@ class WindowTests(EdgeCase):
         self.assertEqual(schedule.prepare_window(thursday, {'time': '07:00', 'days': []}, 30, '05:30', True), (local(5, 30), local(9, 30)))
         self.assertIsNone(schedule.prepare_window(thursday, {'time': '07:00', 'days': []}, 30, '05:30', False))  # nothing triggers it
         self.assertEqual(schedule.prepare_window(thursday, None, 30, 'xx', True), (local(6), local(10)))
+        self.assertEqual(schedule.prepare_window(local(11, 30), EVERY_DAY, 30, '06:00', False), (local(6, 30, day=30), local(11, day=30)))
+
+    def test_a_time_just_after_midnight_is_prepared_the_evening_before_on_the_right_day(self):
+        thursday_0010 = {'time': '00:10', 'days': [3]}  # 2026-10-29 is a Thursday (3)
+        window = (local(23, 40, day=28), local(4, 10, day=29))
+        self.assertEqual(schedule.prepare_window(local(23, 45, day=28), thursday_0010, 30, '06:00', False), window)
+        self.assertEqual(schedule.prepare_window(local(0, 5, day=29), thursday_0010, 30, '06:00', False), window)
+        self.assertEqual(schedule.prepare_window(local(23, 0, day=28), thursday_0010, 30, '06:00', False), window)  # the next one
+        wednesday_0010 = {'time': '00:10', 'days': [2]}
+        self.assertIsNone(schedule.prepare_window(local(23, 45, day=28), wednesday_0010, 30, '06:00', False))  # Thursday's 00:10: not chosen
+        self.assertEqual(schedule.prepare_window(local(23, 0, day=27), wednesday_0010, 30, '06:00', False),
+                         (local(23, 40, day=27), local(4, 10, day=28)))
         with mock.patch.dict(os.environ, {'IQ_BRIEFING_PREPARE_MINUTES': '500'}):
             self.assertEqual(schedule.prepare_minutes(), 180)
         with mock.patch.dict(os.environ, {'IQ_BRIEFING_PREPARE_MINUTES': ''}):
@@ -50,26 +79,51 @@ class WindowTests(EdgeCase):
 
 
 class PreparerTests(ReadyCase):
-    def test_prepared_at_the_time_renewed_until_spoken_and_discarded_after(self):
+    def test_prepared_once_renewed_after_90_minutes_at_most_twice_and_discarded_after(self):
         self.assertFalse(self.preparer.tick(local(6, 29)))
         self.assertIsNone(ready.load())
         self.assertTrue(self.preparer.tick(local(6, 30)))
         data = ready.load()
         self.assertEqual((data['text'], data['language']), ('Hoje tem obras na avenida.', 'pt'))  # no greeting: it comes at the time
         self.assertEqual([c['titulo'] for c in data['cards']], ['Cidade'])  # no house card: it comes at the time
+        self.assertEqual(settings.parse_time(data['until']), local(11))
         sent = self.center.composed[0]['body']
         self.assertEqual((sent['facts']['names'], sent['house_state'], sent['facts']['open']), ([], False, []))  # nothing of the house
         if os.name == 'posix':
             self.assertEqual(os.stat(ready.path()).st_mode & 0o777, 0o600)
-        self.assertFalse(self.preparer.tick(local(6, 45)))  # fresh
-        self.assertTrue(self.preparer.tick(local(7, 1)))  # 31 minutes old: renewed
-        self.assertEqual(len(self.center.composed), 2)
-        prefs.set_state(last_spoken_at=local(7, 5).astimezone(timezone.utc).isoformat())
-        self.assertFalse(self.preparer.tick(local(7, 40)))  # spoken: no more renewals
-        self.assertEqual(len(self.center.composed), 2)
-        self.assertIsNotNone(ready.load())
-        self.assertFalse(self.preparer.tick(local(11, 0)))  # 4 h after the time: discarded
+        for minute in ((6, 45), (7, 1), (7, 59)):
+            self.assertFalse(self.preparer.tick(local(*minute)))  # under 90 minutes: kept
+        self.assertEqual(len(self.center.composed), 1)
+        self.assertTrue(self.preparer.tick(local(8, 1)))  # 91 minutes: the first renewal
+        self.assertTrue(self.preparer.tick(local(9, 32)))  # the second
+        self.assertEqual(len(self.center.composed), 3)
+        prefs.save_local(self.prefs(schedule=EVERY_DAY, max_words=90))  # would need another one, but 2 renewals is the most
+        self.assertFalse(self.preparer.tick(local(9, 40)))
+        self.assertEqual(len(self.center.composed), 3)
+        self.assertFalse(self.preparer.tick(local(11, 0)))  # the end of its window: discarded
         self.assertIsNone(ready.load())
+
+    def test_spoken_in_the_window_means_no_renewal(self):
+        self.assertTrue(self.preparer.tick(local(6, 30)))
+        prefs.set_state(last_spoken_at=local(7, 5).astimezone(timezone.utc).isoformat())
+        self.assertFalse(self.preparer.tick(local(8, 10)))
+        self.assertEqual(len(self.center.composed), 1)
+        self.assertIsNotNone(ready.load())
+
+    def test_a_failed_start_never_leaves_the_preparer_stuck(self):
+        def broken(job):
+            raise RuntimeError('no thread')
+        preparer = schedule.Preparer(spawn=broken)
+        with self.assertRaises(RuntimeError):
+            preparer.tick(local(6, 30))
+        self.assertTrue(preparer.busy.acquire(blocking=False))  # released
+        preparer.busy.release()
+
+    def test_the_scheduler_reads_the_files_once_per_tick(self):
+        runner = schedule.Scheduler(speak=lambda: (True, ''), clock=lambda: local(5, 0), preparer=self.preparer)
+        with mock.patch.object(prefs, 'state', wraps=prefs.state) as state, mock.patch.object(prefs, 'load', wraps=prefs.load) as load:
+            self.assertFalse(runner.tick())
+        self.assertEqual((state.call_count, load.call_count), (1, 1))
 
     def test_new_preferences_prepare_again_and_nothing_without_a_speaker(self):
         self.assertTrue(self.preparer.tick(local(6, 30)))
@@ -139,6 +193,13 @@ class SpeechTests(ReadyCase):
         data = ready.load()
         settings.write_json(ready.path(), dict(data, prepared_at=(datetime.now(timezone.utc) - timedelta(hours=2, minutes=1)).isoformat()))
         self.assertIsNone(ready.fresh('pt'))
+        self.assertIn('ainda não preparado', self.status_page())  # the tab never says "prepared" for a text the speech refuses
+        ready.prepare('pt')
+        self.assertIn('preparado às', self.status_page())
+        prefs.save_local(self.prefs(schedule=EVERY_DAY, max_words=90))
+        self.assertIn('ainda não preparado', self.status_page())  # other values: refused by speak_now, so not "prepared"
+        settings.write_json(ready.path(), dict(data, prepared_at=(datetime.now(timezone.utc) - timedelta(hours=2, minutes=1)).isoformat()))
+        self.assertIsNone(ready.fresh('pt'))
         ready.prepare('pt')
         self.assertIsNotNone(ready.fresh('pt'))
         self.assertIsNone(ready.fresh('en'))  # the event asked for English: composed now
@@ -159,10 +220,15 @@ class VoiceCacheTests(ReadyCase):
     def test_the_voice_is_cached_once_with_the_same_message(self):
         with mock.patch.dict(os.environ, {'IQ_BRIEFING_TTS_VOICE': 'voz-pt'}):
             ready.prepare('pt')
+            ready.prepare('pt')  # the same text again: no new audio
         self.assertEqual(self.ha.tts_requests, [{'engine_id': 'tts.google_pt', 'language': 'pt', 'options': {'voice': 'voz-pt'},
                                                  'message': 'Bom dia, Franco. A casa está toda fechada. Hoje tem obras na avenida.'}])
         self.assertEqual(len(self.ha.requests_to('/core/api/tts_proxy/')), 1)  # the audio was generated (downloaded once)
         self.assertEqual([p for p, _ in self.ha.service_calls if 'tts' in p or 'media_player' in p], [])  # nothing played
+        self.center.compose_answer = (200, dict(AI, text='Bom dia! Chuva forte à tarde.'), {})
+        ready.prepare('pt')  # a new text: a new audio
+        self.assertEqual(len(self.ha.tts_requests), 2)
+        self.assertTrue(self.ha.tts_requests[1]['message'].endswith('Chuva forte à tarde.'))
 
     def test_a_failure_of_the_voice_cache_is_ignored(self):
         self.ha.tts_fail = True

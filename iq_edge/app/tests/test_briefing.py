@@ -513,6 +513,27 @@ class IaTest(unittest.TestCase):
             self.assertTrue(fala.startswith("Bom dia"), resposta)
             self.assertIn("Portão da garagem", fala)
 
+    def test_preparo_tira_a_frase_de_saudacao_inteira(self) -> None:
+        casos = {
+            "Bom dia a todos! Hoje tem obras.": "Hoje tem obras.",
+            "Olá! Bom dia. Chuva à tarde.": "Chuva à tarde.",
+            "Good morning, everyone. Rain later.": "Rain later.",
+            "Hi there! Rain later.": "Rain later.",
+            "Bom dia hoje tem obras": "Hoje tem obras",
+            "Hoje tem obras.": "Hoje tem obras.",
+            "Oito horas. Bom dia.": "Oito horas. Bom dia.",
+            # primeira frase longa tem conteudo: sai so a saudacao
+            "Bom dia, hoje faz vinte e cinco graus com chuva forte e vento na cidade.":
+                "Hoje faz vinte e cinco graus com chuva forte e vento na cidade.",
+        }
+        for texto, esperado in casos.items():
+            cliente, _ = centro_falso({"text": texto, "picks": []})
+            fala, _ = briefing.compose(self.dados, PREVISAO, [], "pt", client=cliente, preparo=True)
+            self.assertEqual(fala, esperado, texto)
+        cliente, _ = centro_falso({"text": "Bom dia!", "picks": []})  # so a saudacao: o texto por regra (clima e noticias)
+        fala, _ = briefing.compose(self.dados, PREVISAO, [], "pt", client=cliente, preparo=True)
+        self.assertTrue(fala.startswith("Agora faz 78 graus Fahrenheit"))
+
     def test_fala_longa_demais_e_cortada(self) -> None:
         cliente, _ = centro_falso({"text": "palavra " * 2000, "picks": []})
         self.assertLessEqual(len(briefing.compose_spoken(self.dados, PREVISAO, [], "pt", client=cliente)), 4000)

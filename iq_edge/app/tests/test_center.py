@@ -14,6 +14,9 @@ from tests.fakes import EdgeCase
 
 class PairingTests(EdgeCase):
     def test_pairs_with_the_options_code_and_clears_it(self):
+        from iq_edge import settings
+        settings.write_json(settings.data_dir() / 'options.json', {'center_url': 'https://business.iqautom8.com', 'pairing_code': '123456'},
+                            private=False)
         with mock.patch.dict(os.environ, {'IQ_PAIRING_CODE': '123 456'}):
             edge = Center()
             self.assertEqual(edge.step(), 0)
@@ -29,6 +32,16 @@ class PairingTests(EdgeCase):
         public = edge.public()
         self.assertEqual((public['state'], public['paired'], public['home_name']), ('paired', True, 'Casa <Teste>'))
         self.assertNotIn('C' * 43, json.dumps(public))
+
+    def test_unreadable_options_are_never_written_back(self):
+        from iq_edge import settings
+        with mock.patch.dict(os.environ, {'IQ_PAIRING_CODE': '123456'}), self.assertLogs('iq_edge.center', level='WARNING') as logs:
+            self.assertEqual(Center().step(), 0)  # no options.json: paired, but the Supervisor is never asked to replace the options
+        self.assertEqual(self.ha.options_posts, [])
+        self.assertIn('Não consegui ler as opções', logs.output[0])
+        (settings.data_dir() / 'options.json').write_text('{not json', encoding='utf-8')
+        Center().clear_option_code()
+        self.assertEqual(self.ha.options_posts, [])
 
     def test_a_refused_code_is_not_sent_again_by_itself(self):
         with mock.patch.dict(os.environ, {'IQ_PAIRING_CODE': '999999'}):
