@@ -1,0 +1,7 @@
+configuration:
+  center_url:
+    name: Endereço da plataforma
+    description: A plataforma IQ Autom8. Só mude se a IQ pedir.
+  pairing_code:
+    name: Código de pareamento
+    description: Os 6 dígitos que a IQ gerou para esta casa na plataforma (vale 15 minutos). Some depois de parear.

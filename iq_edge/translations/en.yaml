@@ -1,0 +1,7 @@
+configuration:
+  center_url:
+    name: Platform address
+    description: The IQ Autom8 platform. Change it only if IQ asks you to.
+  pairing_code:
+    name: Pairing code
+    description: The 6 digits IQ generated for this home on the platform (valid for 15 minutes). It is cleared after pairing.
