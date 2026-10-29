@@ -1160,6 +1160,11 @@ def speaker_config() -> dict[str, Any] | None:
     }
 
 
+def satellite() -> str:
+    """O assist_satellite de reserva (opcao `satellite` do add-on), ou ""."""
+    return os.getenv("IQ_BRIEFING_SATELLITE", "").strip()
+
+
 def speaker_ready(cfg: dict[str, Any], estados: list[dict[str, Any]]) -> bool:
     """O alto-falante e o motor de voz existem e nao estao indisponiveis?
     Checado com os estados que o resumo ja leu, sem chamada extra."""
@@ -1445,13 +1450,17 @@ def handle(
     get_volume_fn: Callable[[str], float | None] | None = None,
     set_volume_fn: Callable[[str, float], bool] | None = None,
     wait_fn: Callable[[str, float], None] | None = None,
+    idioma_pedido: str | None = None,
 ) -> str | None:
     """Se `texto` pede o resumo, devolve a fala (e publica os cartoes no
-    painel). Se nao pede, devolve None e quem chamou segue o fluxo normal."""
+    painel). Se nao pede, devolve None e quem chamou segue o fluxo normal.
+    `idioma_pedido` ("pt"/"en", ex.: o `language` do evento iq_bom_dia) vale no lugar do idioma salvo."""
     idioma = detect_briefing(texto)
     if idioma is None:
         return None
-    if "automatico" in _normalizar(texto).split() and _pref("language") in _T:
+    if idioma_pedido in _T:
+        idioma = idioma_pedido
+    elif "automatico" in _normalizar(texto).split() and _pref("language") in _T:
         idioma = _pref("language")  # lote H2: o pedido automatico fala no idioma escolhido no centro
 
     estados_fn = fetch_states_fn or fetch_states

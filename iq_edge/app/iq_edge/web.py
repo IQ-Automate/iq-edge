@@ -109,10 +109,11 @@ def parse_form(form, current):
 
 
 class App:
-    """What the pages need: the center client (status, pair, unpair, send_prefs) and a per-process secret for the CSRF tokens."""
+    """What the pages need: the center client (status, pair, unpair, send_prefs, the AI's last answer), the listener of Home
+    Assistant's event iq_bom_dia (None outside Home Assistant) and a per-process secret for the CSRF tokens."""
 
-    def __init__(self, center):
-        self.center = center
+    def __init__(self, center, listener=None):
+        self.center, self.listener = center, listener
         self.secret = secrets.token_bytes(32)
 
     def csrf(self, user_id):
