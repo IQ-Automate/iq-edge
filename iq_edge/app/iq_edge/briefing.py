@@ -305,8 +305,59 @@ def _motor_tts(do_env: str) -> str:
     if valor and do_env and valor in do_env.lower():
         return do_env
     if valor and not do_env:
-        return "tts." + valor
+        return _resolver_motor(valor)
     return do_env
+
+
+# Entidades tts.* do HA, guardadas por ~10 minutos para o _motor_tts nao consultar o HA a cada chamada: (url, validade, ids).
+# Se a consulta falha, a lista vazia tambem fica guardada, por pouco tempo, para uma casa fora do ar nao travar tudo.
+_TTS_VALIDADE = 600.0
+_TTS_VALIDADE_ERRO = 60.0
+_tts_cache: tuple[str, float, list[str]] | None = None
+_motores_resolvidos: set[tuple[str, str]] = set()
+
+
+def _entidades_tts() -> list[str]:
+    """Os entity_id tts.* que o HA tem agora (em cache por ~10 min). Lista vazia se nao der para ler (qualquer erro)."""
+    global _tts_cache
+    if not HA_URL or not HA_TOKEN:
+        return []
+    agora = time.monotonic()
+    guardado = _tts_cache
+    if guardado is not None and guardado[0] == HA_URL and agora < guardado[1]:
+        return guardado[2]
+    try:
+        resposta = requests.get(f"{HA_URL}/api/states", headers=_ha_headers(), timeout=8)
+        resposta.raise_for_status()
+        estados = resposta.json()
+        if not isinstance(estados, list):
+            raise ValueError("resposta inesperada do HA")
+        ids = sorted(
+            str(e["entity_id"])
+            for e in estados
+            if isinstance(e, dict) and str(e.get("entity_id", "")).startswith("tts.")
+        )
+        validade = _TTS_VALIDADE
+    except Exception:  # qualquer falha: segue sem a lista (o comportamento antigo vale)
+        logger.warning("Nao consegui listar os motores de voz (tts.*) do HA.", exc_info=True)
+        ids, validade = [], _TTS_VALIDADE_ERRO
+    _tts_cache = (HA_URL, agora + validade, ids)
+    return ids
+
+
+def _resolver_motor(nome: str) -> str:
+    """Nome curto de fornecedor (ex.: elevenlabs) -> a entidade tts.* real do HA (tts.elevenlabs_text_to_speech): a que
+    comeca pelo nome, ou, se nao houver, a que o contem; a mais curta ganha. Sem achar, vale "tts." + nome."""
+    chave = nome.strip().lower()
+    ids = _entidades_tts() if chave else []
+    achados = [e for e in ids if e[4:].startswith(chave)] or [e for e in ids if chave in e[4:]]
+    if not achados:
+        return "tts." + nome
+    escolhido = min(achados, key=lambda e: (len(e), e))
+    if (chave, escolhido) not in _motores_resolvidos:
+        _motores_resolvidos.add((chave, escolhido))
+        logger.info("Motor de voz '%s' -> %s", nome, escolhido)
+    return escolhido
 
 
 # --------------------------------------------------------------------------
@@ -1304,10 +1355,16 @@ def speak_on_speaker(fala: str, idioma: str, cfg: dict[str, Any]) -> bool:
         corpo["options"] = {"voice": voz}
     try:
         resposta = requests.post(
-            f"{HA_URL}/api/services/tts/speak", headers=_ha_headers(), json=corpo, timeout=30
+            f"{HA_URL}/api/services/tts/speak",
+            headers=_ha_headers(),
+            json=corpo,
+            timeout=(10, _espera_do_ha(fala)),
         )
         resposta.raise_for_status()
         return True
+    except requests.Timeout:
+        logger.warning("Resumo: o HA nao respondeu a tempo ao tts.speak (a fala pode ter sido tocada mesmo assim).")
+        return False
     except requests.RequestException:
         logger.warning("Resumo: nao consegui tocar a voz premium no alto-falante.", exc_info=True)
         return False
@@ -1322,10 +1379,13 @@ def announce_on_satellite(fala: str, satelite: str) -> bool:
             f"{HA_URL}/api/services/assist_satellite/announce",
             headers=_ha_headers(),
             json={"entity_id": satelite, "message": fala},
-            timeout=30,
+            timeout=(10, _espera_do_ha(fala)),
         )
         resposta.raise_for_status()
         return True
+    except requests.Timeout:
+        logger.warning("Resumo: o HA nao respondeu a tempo ao anuncio no satelite (a fala pode ter sido tocada mesmo assim).")
+        return False
     except requests.RequestException:
         logger.warning("Resumo: a reserva (anuncio no satelite) tambem falhou.", exc_info=True)
         return False
@@ -1367,6 +1427,13 @@ def _estimar_duracao(fala: str) -> float:
     entao nao da para esperar pelo fim observando o estado: o volume voltou depois de
     16 s, no meio de uma fala de ~40 s (2026-10-08)."""
     return max(6.0, len(fala) / 12.0) + 4.0
+
+
+def _espera_do_ha(fala: str) -> float:
+    """Quanto esperar a resposta do HA a tts.speak / assist_satellite.announce: esses servicos so voltam depois da fala
+    (ou da voz gerada), entao vale a duracao estimada mais 30 s de folga, no maximo 240 s (um resumo de 34 s estourou
+    os 30 s fixos de antes em 2026-10-29)."""
+    return min(240.0, _estimar_duracao(fala) + 30.0)
 
 
 def wait_speaker_idle(entidade: str, minimo: float = 0.0, *, maximo: float = 150.0) -> None:

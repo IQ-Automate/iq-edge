@@ -1587,3 +1587,213 @@ class PreferenciasDoCentroTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# 0.2.1: espera do HA pelo tamanho da fala e motor de voz resolvido pelas entidades do HA
+# --------------------------------------------------------------------------
+
+
+class EsperaDoHaTest(unittest.TestCase):
+    """tts.speak e assist_satellite.announce so voltam depois da fala: o tempo de espera vem do texto, nao fixo em 30 s."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.multiple(briefing, HA_URL="http://ha.teste/core", HA_TOKEN="token-falso")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.chamadas: list = []
+        self.cfg = {"engine": "tts.elevenlabs_text_to_speech", "speaker": "media_player.living", "voz_pt": "", "voz_en": ""}
+
+    def _post(self, erro=None):
+        def post(url, **kwargs):
+            self.chamadas.append((url, kwargs))
+            if erro is not None:
+                raise erro
+            return SimpleNamespace(raise_for_status=lambda: None)
+
+        return mock.patch.object(briefing.requests, "post", post)
+
+    def test_anuncio_do_satelite_espera_a_duracao_estimada_mais_folga(self) -> None:
+        fala = "a" * 400  # ~34 s de fala: com os 30 s fixos de antes estourava
+        with self._post():
+            self.assertTrue(briefing.announce_on_satellite(fala, "assist_satellite.sala"))
+        url, kwargs = self.chamadas[0]
+        self.assertTrue(url.endswith("/api/services/assist_satellite/announce"))
+        self.assertEqual(kwargs["timeout"], (10, briefing._estimar_duracao(fala) + 30))
+        self.assertGreater(kwargs["timeout"][1], 60)
+
+    def test_tts_speak_espera_a_duracao_estimada_mais_folga(self) -> None:
+        fala = "a" * 600
+        with self._post():
+            self.assertTrue(briefing.speak_on_speaker(fala, "pt", self.cfg))
+        url, kwargs = self.chamadas[0]
+        self.assertTrue(url.endswith("/api/services/tts/speak"))
+        self.assertEqual(kwargs["timeout"], (10, briefing._estimar_duracao(fala) + 30))
+
+    def test_espera_minima_e_teto_de_240_segundos(self) -> None:
+        self.assertEqual(briefing._espera_do_ha("oi"), 40.0)  # 6 s de fala + 4 de margem + 30
+        self.assertEqual(briefing._espera_do_ha("a" * 10000), 240.0)
+        with self._post():
+            briefing.announce_on_satellite("a" * 10000, "assist_satellite.sala")
+            briefing.speak_on_speaker("a" * 10000, "pt", self.cfg)
+        self.assertEqual([c[1]["timeout"] for c in self.chamadas], [(10, 240.0), (10, 240.0)])
+
+    def test_estouro_do_tempo_vira_uma_linha_sem_traceback(self) -> None:
+        import requests
+
+        chamadas = (
+            lambda: briefing.announce_on_satellite("Bom dia.", "assist_satellite.sala"),
+            lambda: briefing.speak_on_speaker("Bom dia.", "pt", self.cfg),
+        )
+        for chamar in chamadas:
+            with self.subTest(chamar=chamar), self._post(requests.ReadTimeout("sem resposta")):
+                with self.assertLogs("iq_edge.briefing", level="WARNING") as log:
+                    self.assertFalse(chamar())
+                self.assertEqual(len(log.records), 1)
+                self.assertIsNone(log.records[0].exc_info)
+                self.assertIn("nao respondeu a tempo", log.records[0].getMessage())
+                self.assertIn("pode ter sido tocada", log.records[0].getMessage())
+
+    def test_outro_erro_continua_com_traceback(self) -> None:
+        import requests
+
+        chamadas = (
+            lambda: briefing.announce_on_satellite("Bom dia.", "assist_satellite.sala"),
+            lambda: briefing.speak_on_speaker("Bom dia.", "pt", self.cfg),
+        )
+        for chamar in chamadas:
+            with self.subTest(chamar=chamar), self._post(requests.ConnectionError("HA fora do ar")):
+                with self.assertLogs("iq_edge.briefing", level="WARNING") as log:
+                    self.assertFalse(chamar())
+                self.assertEqual(len(log.records), 1)
+                self.assertIsNotNone(log.records[0].exc_info)
+
+
+class MotorDeVozPeloHaTest(unittest.TestCase):
+    """O centro manda o motor como nome curto (elevenlabs) e o add-on nao tem IQ_BRIEFING_TTS_ENGINE: o nome vira a entidade
+    tts.* real do HA (tts.elevenlabs_text_to_speech). Sem achar, ou com o HA fora do ar, vale o comportamento antigo."""
+
+    ESTADOS_TTS = [
+        {"entity_id": "tts.google_translate_en_com", "state": "unknown", "attributes": {}},
+        {"entity_id": "tts.elevenlabs_text_to_speech", "state": "unknown", "attributes": {}},
+        {"entity_id": "media_player.living", "state": "idle", "attributes": {}},
+        {"entity_id": "light.sala", "state": "on", "attributes": {}},
+    ]
+
+    def setUp(self) -> None:
+        self.pasta = tempfile.TemporaryDirectory()
+        self.addCleanup(self.pasta.cleanup)
+        arquivo = os.path.join(self.pasta.name, "data", "briefing-prefs.json")
+        env = mock.patch.dict(os.environ, {"IQ_BRIEFING_PREFS_FILE": arquivo, "IQ_BRIEFING_TTS_ENGINE": "",
+                                           "IQ_BRIEFING_SPEAKER": ""})
+        env.start()
+        self.addCleanup(env.stop)
+        patcher = mock.patch.multiple(briefing, HA_URL="http://ha.teste/core", HA_TOKEN="token-falso")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._limpar_cache()
+        self.addCleanup(self._limpar_cache)
+        self.gets: list = []
+        briefing.gravar_prefs(1, dict(PREFS_DO_CENTRO, tts_engine="elevenlabs"))
+
+    @staticmethod
+    def _limpar_cache() -> None:
+        briefing._tts_cache = None
+        briefing._motores_resolvidos.clear()
+
+    def _ha(self, estados=None, erro=None):
+        def get(url, **kwargs):
+            self.gets.append((url, kwargs))
+            if erro is not None:
+                raise erro
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: self.ESTADOS_TTS if estados is None else estados)
+
+        return mock.patch.object(briefing.requests, "get", get)
+
+    def test_nome_curto_vira_a_entidade_do_ha(self) -> None:
+        with self._ha():
+            self.assertEqual(briefing.speaker_config()["engine"], "tts.elevenlabs_text_to_speech")
+        url, kwargs = self.gets[0]
+        self.assertEqual(url, "http://ha.teste/core/api/states")
+        self.assertEqual(kwargs["timeout"], 8)
+
+    def test_comeca_pelo_nome_antes_de_conter_e_a_mais_curta_ganha(self) -> None:
+        estados = [{"entity_id": e, "state": "unknown", "attributes": {}} for e in (
+            "tts.elevenlabs_text_to_speech", "tts.elevenlabs_br", "tts.meu_elevenlabs", "tts.google_pt")]
+        with self._ha(estados):
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs_br")  # as duas que comecam pelo nome: a mais curta
+        self._limpar_cache()
+        estados = [{"entity_id": e, "state": "unknown", "attributes": {}} for e in (
+            "tts.a_elevenlabs", "tts.elevenlabs_text_to_speech")]
+        with self._ha(estados):
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs_text_to_speech")  # comecar pelo nome vale mais que ser curta
+        self._limpar_cache()
+        estados = [{"entity_id": e, "state": "unknown", "attributes": {}} for e in ("tts.xx_elevenlabs_longa", "tts.meu_elevenlabs")]
+        with self._ha(estados):
+            self.assertEqual(briefing._motor_tts(""), "tts.meu_elevenlabs")  # so contem: a mais curta
+
+    def test_sem_entidade_parecida_vale_o_comportamento_antigo(self) -> None:
+        with self._ha([{"entity_id": "tts.google_translate_en_com", "state": "unknown", "attributes": {}}]):
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs")
+        self._limpar_cache()
+        with self._ha([]):
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs")
+
+    def test_ha_com_erro_vale_o_comportamento_antigo(self) -> None:
+        import requests
+
+        for erro in (requests.ConnectionError("HA fora do ar"), requests.Timeout("lento"), ValueError("json ruim")):
+            self._limpar_cache()
+            with self.subTest(erro=erro), self._ha(erro=erro), self.assertLogs("iq_edge.briefing", level="WARNING"):
+                self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs")
+                self.assertEqual(briefing.speaker_config()["engine"], "tts.elevenlabs")  # a configuracao nao quebra
+
+    def test_resposta_estranha_do_ha_vale_o_comportamento_antigo(self) -> None:
+        with self._ha(estados={"message": "401"}), self.assertLogs("iq_edge.briefing", level="WARNING"):
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs")
+
+    def test_segunda_chamada_usa_o_cache(self) -> None:
+        with self._ha():
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs_text_to_speech")
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs_text_to_speech")
+            self.assertEqual(briefing.speaker_config()["engine"], "tts.elevenlabs_text_to_speech")
+        self.assertEqual(len(self.gets), 1)
+        # vencido o prazo (~10 min), consulta de novo
+        url, _, ids = briefing._tts_cache
+        briefing._tts_cache = (url, 0.0, ids)
+        with self._ha():
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs_text_to_speech")
+        self.assertEqual(len(self.gets), 2)
+
+    def test_falha_tambem_fica_guardada_por_pouco_tempo(self) -> None:
+        import requests
+
+        with self._ha(erro=requests.ConnectionError("fora")), self.assertLogs("iq_edge.briefing", level="WARNING"):
+            briefing._motor_tts("")
+            briefing._motor_tts("")
+        self.assertEqual(len(self.gets), 1)  # uma casa fora do ar nao faz o resumo esperar 8 s a cada chamada
+
+    def test_motor_do_env_ou_entidade_completa_nao_consulta_o_ha(self) -> None:
+        with self._ha():
+            with mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_ENGINE": "tts.elevenlabs_text_to_speech"}):
+                self.assertEqual(briefing._motor_tts(os.environ["IQ_BRIEFING_TTS_ENGINE"]), "tts.elevenlabs_text_to_speech")
+            briefing.gravar_prefs(2, dict(PREFS_DO_CENTRO, tts_engine="tts.google_pt"))
+            self.assertEqual(briefing._motor_tts(""), "tts.google_pt")
+        self.assertEqual(self.gets, [])
+
+    def test_sem_token_nao_consulta_o_ha(self) -> None:
+        with mock.patch.object(briefing, "HA_TOKEN", ""), self._ha():
+            self.assertEqual(briefing._motor_tts(""), "tts.elevenlabs")
+        self.assertEqual(self.gets, [])
+
+    def test_registra_uma_vez_a_escolha(self) -> None:
+        with self._ha(), self.assertLogs("iq_edge.briefing", level="INFO") as log:
+            briefing._motor_tts("")
+            briefing._motor_tts("")
+        escolhas = [r.getMessage() for r in log.records if "Motor de voz" in r.getMessage()]
+        self.assertEqual(escolhas, ["Motor de voz 'elevenlabs' -> tts.elevenlabs_text_to_speech"])
+
+    def test_com_alto_falante_o_motor_vai_na_configuracao(self) -> None:
+        with self._ha():
+            cfg = briefing.speaker_config()  # o alto-falante vem das preferencias do centro
+        self.assertEqual((cfg["speaker"], cfg["engine"]), ("media_player.living", "tts.elevenlabs_text_to_speech"))
