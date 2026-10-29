@@ -138,9 +138,16 @@ def make_handler(app):
             path = (self.headers.get('X-Ingress-Path') or '').strip()
             return path if INGRESS.fullmatch(path) else '.'
 
+        def header(self, name):
+            value = self.headers.get(name) or ''
+            try:  # http.server reads headers as latin-1; Home Assistant sends UTF-8 (a name with accents)
+                return value.encode('latin-1').decode('utf-8').strip()
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                return value.strip()
+
         def user(self):
-            return {'id': (self.headers.get('X-Remote-User-Id') or '').strip()[:80],
-                    'name': (self.headers.get('X-Remote-User-Display-Name') or self.headers.get('X-Remote-User-Name') or '').strip()[:60]}
+            return {'id': self.header('X-Remote-User-Id')[:80],
+                    'name': (self.header('X-Remote-User-Display-Name') or self.header('X-Remote-User-Name'))[:60]}
 
         def allowed(self):
             return self.client_address[0] in settings.ingress_peers()
