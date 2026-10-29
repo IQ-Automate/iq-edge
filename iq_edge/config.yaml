@@ -1,5 +1,5 @@
 name: IQ Edge
-version: "0.2.0"
+version: "0.2.1"
 slug: iq_edge
 description: Conecta esta casa à plataforma IQ Autom8 (pareamento por código) e traz o Bom dia editável na aba IQ.
 url: https://github.com/IQ-Automate/iq-edge

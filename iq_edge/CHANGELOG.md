@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- Correção: falar o Bom dia não estoura mais aos 30 s. `tts.speak` e o anúncio no aparelho de voz só respondem depois da fala;
+  a espera agora é a duração estimada do texto + 30 s (no máximo 240 s). Se mesmo assim o Home Assistant não responder a tempo,
+  o registro tem uma linha de aviso (a fala pode ter sido tocada), sem o rastro de erro.
+- Correção: o motor de voz que o centro manda como nome curto (ex.: `elevenlabs`) vira a entidade `tts.*` real do Home Assistant
+  (ex.: `tts.elevenlabs_text_to_speech`), em vez de `tts.elevenlabs`, que não existe. A lista de entidades fica guardada por
+  10 minutos; sem achar (ou com o Home Assistant fora do ar), vale o comportamento antigo.
+
 ## 0.2.0
 
 - Bom dia com IA pela plataforma (lote A5): a casa manda só os dados do resumo (`POST briefing-compose`, contrato v2) e usa o

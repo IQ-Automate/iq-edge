@@ -27,7 +27,7 @@ class PairingTests(EdgeCase):
             self.assertEqual(stat.S_IMODE(os.stat(edge.path()).st_mode), 0o600)
         self.assertEqual(self.center.pair_info['code'], '123456')
         self.assertEqual((self.center.pair_info['addon_version'], self.center.pair_info['arch'], self.center.pair_info['ha_version']),
-                         ('0.2.0', 'amd64', '2026.10.4'))
+                         ('0.2.1', 'amd64', '2026.10.4'))
         self.assertEqual(self.ha.options_posts, [{'options': {'center_url': self.center.url, 'pairing_code': ''}}])
         public = edge.public()
         self.assertEqual((public['state'], public['paired'], public['home_name']), ('paired', True, 'Casa <Teste>'))
@@ -73,7 +73,7 @@ class JobTests(PairedCase):
         self.assertEqual(self.edge.step(), 0)
         beat = self.center.heartbeats[0]
         self.assertEqual((beat['ha_version'], beat['health'], beat['addon_version'], beat['programs']),
-                         ('2026.10.4', 'ok', '0.2.0', {'automations': 1, 'scripts': 0, 'scenes': 0}))
+                         ('2026.10.4', 'ok', '0.2.1', {'automations': 1, 'scripts': 0, 'scenes': 0}))
         self.assertEqual(self.center.results[job], {'ok': True, 'status': 200, 'data': self.ha.config})
         self.assertEqual(self.edge.time_zone, 'America/New_York')
         self.assertEqual(self.edge.step(), 0.0)  # nothing queued: 204, poll again at once
@@ -117,7 +117,7 @@ class JobTests(PairedCase):
         self.assertEqual(self.ha.requests_to('/core/api/services/tts'), [])  # and spoke nothing
         ping = self.center.queue('ping', {}, job_id='g')
         self.edge.step()
-        self.assertEqual(self.center.results[ping]['data'], {'pong': True, 'addon_version': '0.2.0'})
+        self.assertEqual(self.center.results[ping]['data'], {'pong': True, 'addon_version': '0.2.1'})
 
     def test_an_expired_job_never_runs(self):
         self.edge.last_heartbeat = self.edge.clock()
