@@ -38,3 +38,6 @@ configuration:
   prepare_at:
     name: Good morning — prepare at (HH:MM)
     description: For a home without a chosen time that uses the iq_bom_dia event, the time to start preparing (default 06:00).
+  greet_names:
+    name: Good morning — greet by name
+    description: Greets the people at home by name (default on). Off, it says only "Good morning." and uses no names.

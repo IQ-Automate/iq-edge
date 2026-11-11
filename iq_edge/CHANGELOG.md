@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Opção nova `greet_names`: com `false`, o Bom dia fala só "Bom dia." e não usa o nome de ninguém (nem na fala, nem no cartão
+  Casa, nem no pedido à IA). Sem a opção, nada muda.
+- Evento novo `iq_bom_dia_done`: o add-on avisa o Home Assistant quando o Bom dia termina de falar (`spoken`: `true` ou
+  `false`, e `language`). Uma automação pode esperar por ele, por exemplo para começar a música depois da fala.
+
 ## 0.2.1
 
 - Correção: falar o Bom dia não estoura mais aos 30 s. `tts.speak` e o anúncio no aparelho de voz só respondem depois da fala;

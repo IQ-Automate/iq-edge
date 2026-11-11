@@ -1418,6 +1418,476 @@ class CasaDesligadaTest(unittest.TestCase):
                 self.assertTrue(briefing._casa_ligada(), valor)
 
 
+class NomesDesligadosTest(unittest.TestCase):
+    """IQ_BRIEFING_GREET_NAMES=false (opcao greet_names do add-on, 0.2.2): nenhum nome de quem esta em casa vira texto -- a fala
+    diz so "Bom dia.", o cartao Casa nao tem "Em casa: ..." e o pedido ao centro leva `names` vazio. A coleta nao muda (so o texto).
+    Sem a opcao, tudo como antes."""
+
+    NOTICIAS = [("Orlando", ["Hurricane watch for Florida"]), ("Brasil", ["Eleições 2026"])]
+    DESLIGADA = {"IQ_BRIEFING_GREET_NAMES": "false"}
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for variavel in ("IQ_BRIEFING_GREET_NAMES", "IQ_BRIEFING_CASA"):
+            os.environ.pop(variavel, None)  # o ambiente de quem roda os testes nao vale
+        self.dados = briefing.collect_house(ESTADOS)  # garagem aberta, alarme desarmado, Victtor e Matheus em casa
+
+    def _sem_nomes(self, texto) -> None:
+        for nome in ("Victtor", "Matheus"):
+            self.assertNotIn(nome, str(texto))
+
+    def test_saudacao_ligada_e_desligada_em_portugues_e_ingles(self) -> None:
+        self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia, Victtor e Matheus.")
+        self.assertEqual(briefing._saudacao(self.dados, "en"), "Good morning, Victtor and Matheus.")
+        self.assertEqual(briefing._saudacao({**self.dados, "pessoas": ["Ana"]}, "pt"), "Bom dia, Ana.")
+        with mock.patch.dict(os.environ, self.DESLIGADA):
+            self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia.")
+            self.assertEqual(briefing._saudacao(self.dados, "en"), "Good morning.")
+            self.assertEqual(briefing._saudacao({**self.dados, "pessoas": ["Ana"]}, "pt"), "Bom dia.")
+        self.assertEqual(briefing._saudacao({**self.dados, "pessoas": []}, "pt"), "Bom dia.")  # ninguem em casa: igual
+
+    def test_varias_formas_de_desligar(self) -> None:
+        for valor in ("false", "False", "FALSE", " false ", "nao", "não", "NAO", "Não", "no", "NO", "0", "off", " OFF "):
+            with mock.patch.dict(os.environ, {"IQ_BRIEFING_GREET_NAMES": valor}):
+                self.assertFalse(briefing._nomes_ligados(), valor)
+                self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia.", valor)
+
+    def test_opcao_ligada_equivale_a_ausente(self) -> None:
+        self.assertTrue(briefing._nomes_ligados())  # ausente
+        for valor in ("true", "True", "TRUE", "sim", "yes", "1", "on", "", "  "):
+            with mock.patch.dict(os.environ, {"IQ_BRIEFING_GREET_NAMES": valor}):
+                self.assertTrue(briefing._nomes_ligados(), repr(valor))
+                self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia, Victtor e Matheus.", repr(valor))
+
+    def test_prefixo_do_bom_dia_preparado(self) -> None:
+        self.assertEqual(
+            briefing.prefixo_da_hora(self.dados, "pt"), "Bom dia, Victtor e Matheus. Aberto ou destravado agora: Portão da garagem."
+        )
+        self.assertEqual(
+            briefing.prefixo_da_hora(self.dados, "en"),
+            "Good morning, Victtor and Matheus. Open or unlocked right now: Portão da garagem.",
+        )
+        with mock.patch.dict(os.environ, self.DESLIGADA):
+            self.assertEqual(briefing.prefixo_da_hora(self.dados, "pt"), "Bom dia. Aberto ou destravado agora: Portão da garagem.")
+            self.assertEqual(
+                briefing.prefixo_da_hora(self.dados, "en"), "Good morning. Open or unlocked right now: Portão da garagem."
+            )
+        with mock.patch.dict(os.environ, {**self.DESLIGADA, "IQ_BRIEFING_CASA": "nao"}):  # sem a casa tambem: so o cumprimento
+            self.assertEqual(briefing.prefixo_da_hora(self.dados, "pt"), "Bom dia.")
+
+    def test_texto_de_reserva(self) -> None:
+        with mock.patch.dict(os.environ, self.DESLIGADA):
+            for idioma, comeco, fonte in (
+                ("pt", "Bom dia. Agora faz 78 graus Fahrenheit, chuva", "Em Orlando: Hurricane watch for Florida."),
+                ("en", "Good morning. It is 78", "In Orlando: Hurricane watch for Florida."),
+            ):
+                f = briefing.build_spoken_fallback(self.dados, PREVISAO, self.NOTICIAS, idioma)
+                self.assertTrue(f.startswith(comeco), f)
+                self._sem_nomes(f)
+                self.assertIn("Portão da garagem", f)  # o resto da fala continua
+                self.assertIn(fonte, f)
+        # o texto do Bom dia preparado nunca teve cumprimento nem nomes
+        preparo = briefing.build_spoken_fallback(self.dados, PREVISAO, self.NOTICIAS, "pt", preparo=True)
+        self.assertFalse(preparo.startswith("Bom dia"))
+        self._sem_nomes(preparo)
+
+    def test_cartao_casa_sem_a_linha_dos_nomes(self) -> None:
+        ligado = briefing.build_cards(self.dados, PREVISAO, self.NOTICIAS, "pt")[1]
+        self.assertIn("Em casa: Victtor, Matheus", ligado["linhas"])
+        with mock.patch.dict(os.environ, self.DESLIGADA):
+            for idioma, titulo, linha in (("pt", "Casa", "Em casa"), ("en", "Home", "At home")):
+                cartoes = briefing.build_cards(self.dados, PREVISAO, self.NOTICIAS, idioma)
+                casa = cartoes[1]
+                self.assertEqual(casa["titulo"], titulo)
+                self.assertEqual(casa["tom"], "alerta")  # o resto do cartao continua (garagem aberta)
+                self.assertIn("Portão da garagem", casa["linhas"])
+                self.assertFalse([x for x in casa["linhas"] if x.startswith(linha)])
+                self._sem_nomes(cartoes)
+
+    def test_pedido_ao_centro_com_names_vazio(self) -> None:
+        cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
+        briefing.compose_spoken(self.dados, PREVISAO, [("Orlando", ["Furacao"])], "pt", client=cliente)
+        self.assertEqual(pedidos[0]["facts"]["names"], ["Victtor", "Matheus"])  # ausente = ligado
+        with mock.patch.dict(os.environ, self.DESLIGADA):
+            briefing.compose_spoken(self.dados, PREVISAO, [("Orlando", ["Furacao"])], "pt", client=cliente)
+        pedido = pedidos[1]
+        self.assertEqual(pedido["facts"]["names"], [])
+        self._sem_nomes(pedido)  # nome nenhum em lugar nenhum do corpo
+        # o resto do pedido segue igual
+        self.assertTrue(pedido["house_state"])
+        self.assertEqual((pedido["facts"]["open"], pedido["facts"]["alarm"]), (["Portão da garagem"], "desarmado"))
+        self.assertEqual((pedido["facts"]["weather"]["temp"], pedido["facts"]["weather"]["unit"]), ("78", "F"))
+        self.assertEqual(pedido["candidates"][0]["titles"], ["Furacao"])
+
+    def test_a_coleta_nao_muda_so_o_texto(self) -> None:
+        with mock.patch.dict(os.environ, self.DESLIGADA):
+            self.assertEqual(briefing.collect_house(ESTADOS)["pessoas"], ["Victtor", "Matheus"])
+
+    def test_sem_a_opcao_nada_muda(self) -> None:
+        def tudo():
+            return (
+                briefing.build_spoken_fallback(self.dados, PREVISAO, self.NOTICIAS, "pt"),
+                briefing.build_spoken_fallback(self.dados, PREVISAO, self.NOTICIAS, "en"),
+                briefing.build_cards(self.dados, PREVISAO, self.NOTICIAS, "pt"),
+                briefing.prefixo_da_hora(self.dados, "pt"),
+                briefing.pedido_ia(self.dados, PREVISAO, self.NOTICIAS, "pt", {"Orlando": 1, "Brasil": 1}),
+            )
+
+        ausente = tudo()
+        self.assertTrue(ausente[0].startswith("Bom dia, Victtor e Matheus."))
+        self.assertTrue(ausente[1].startswith("Good morning, Victtor and Matheus."))
+        self.assertIn("Em casa: Victtor, Matheus", ausente[2][1]["linhas"])
+        self.assertTrue(ausente[3].startswith("Bom dia, Victtor e Matheus."))
+        self.assertEqual(ausente[4]["facts"]["names"], ["Victtor", "Matheus"])
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_GREET_NAMES": "true"}):  # explicitamente ligada = ausente
+            self.assertEqual(tudo(), ausente)
+
+    def test_do_pedido_de_voz_ate_a_fala_e_aos_cartoes(self) -> None:
+        publicados = []
+        with mock.patch.dict(os.environ, self.DESLIGADA), mock.patch("iq_edge.briefing._ai_client", return_value=None):
+            for texto, comeco in (("bom dia", "Bom dia. "), ("good morning", "Good morning. ")):
+                fala = briefing.handle(
+                    texto,
+                    fetch_states_fn=lambda: ESTADOS,
+                    fetch_forecast_fn=lambda e: PREVISAO,
+                    fetch_feed_fn=lambda url, n: ["Manchete"],
+                    publish_fn=lambda cartoes, duracao: publicados.append(cartoes) or True,
+                    client=None,
+                    feeds=[("Orlando", "https://o")],
+                )
+                self.assertTrue(fala.startswith(comeco), fala)
+                self._sem_nomes(fala)
+        self.assertEqual(len(publicados), 2)
+        self._sem_nomes(publicados)
+
+    def test_bom_dia_preparado_fala_so_bom_dia_na_hora(self) -> None:
+        extras = [
+            {"entity_id": "media_player.living", "state": "idle", "attributes": {}},
+            {"entity_id": "tts.elevenlabs_text_to_speech", "state": "unknown", "attributes": {}},
+        ]
+        env = {
+            **self.DESLIGADA,
+            "IQ_BRIEFING_SPEAKER": "media_player.living",
+            "IQ_BRIEFING_TTS_ENGINE": "tts.elevenlabs_text_to_speech",
+            "IQ_BRIEFING_SATELLITE": "",
+            "IQ_BRIEFING_SPEAKER_VOLUME": "",
+            "IQ_BRIEFING_FEEDS": "",
+        }
+        falas, cartoes = [], []
+        with mock.patch.dict(os.environ, env), mock.patch("iq_edge.briefing._ai_client", return_value=None):
+            pronto, prefixo = briefing.preparar(
+                "pt",
+                fetch_states_fn=lambda: ESTADOS + extras,
+                fetch_forecast_fn=lambda e: PREVISAO,
+                fetch_feed_fn=lambda url, n: [],
+                client=None,
+            )
+            self.assertEqual(prefixo, "Bom dia. Aberto ou destravado agora: Portão da garagem.")
+            self._sem_nomes(pronto)
+            briefing.handle(
+                "bom dia automatico",
+                pronto=pronto,
+                fetch_states_fn=lambda: ESTADOS + extras,
+                publish_fn=lambda c, d: cartoes.append(c) or True,
+                speak_fn=lambda fala, idioma, cfg: falas.append(fala) or True,
+                spawn_fn=lambda f: f(),
+                sleep_fn=lambda s: None,
+                done_fn=lambda spoken, idioma: None,
+            )
+        self.assertEqual(len(falas), 1)
+        self.assertTrue(falas[0].startswith("Bom dia. Aberto ou destravado agora: Portão da garagem."), falas[0])
+        self._sem_nomes(falas[0])
+        self._sem_nomes(cartoes)
+        self.assertIn("Casa", [c["titulo"] for c in cartoes[0]])  # o cartao Casa entra na hora, sem a linha dos nomes
+
+
+class _RelogioFalso:
+    """Relogio e sleep falsos: `dormir` so anda o relogio, nada espera de verdade."""
+
+    def __init__(self) -> None:
+        self.agora = 0.0
+        self.dormiu: list[float] = []
+
+    def __call__(self) -> float:
+        return self.agora
+
+    def dormir(self, segundos: float) -> None:
+        self.dormiu.append(segundos)
+        self.agora += segundos
+
+
+class FimDoBomDiaTest(unittest.TestCase):
+    """0.2.2: o evento iq_bom_dia_done avisa o HA quando o Bom dia automatico termina de falar. Sai depois da chamada de voz e do
+    volume, nunca antes do tempo estimado da fala (contado do comeco dela) e, se nada foi falado, na hora com spoken false. Um
+    evento por Bom dia; o pedido de voz nao avisa; um erro ao avisar nao derruba o Bom dia. Relogio e sleep falsos."""
+
+    ENV = {
+        "IQ_BRIEFING_SPEAKER": "media_player.living",
+        "IQ_BRIEFING_TTS_ENGINE": "tts.elevenlabs_text_to_speech",
+        "IQ_BRIEFING_TTS_VOICE": "voz-brian",
+        "IQ_BRIEFING_TTS_VOICE_EN": "",
+        "IQ_BRIEFING_SPEAKER_DELAY": "2",
+        "IQ_BRIEFING_SPEAKER_WAIT": "0",
+        "IQ_BRIEFING_SPEAKER_VOLUME": "",
+        "IQ_BRIEFING_SATELLITE": "assist_satellite.sala",
+    }
+    MOTOR = {"entity_id": "tts.elevenlabs_text_to_speech", "state": "unknown", "attributes": {}}
+    VOZ_OK = [{"entity_id": "media_player.living", "state": "idle", "attributes": {}}, MOTOR]
+    VOZ_FORA = [{"entity_id": "media_player.living", "state": "unavailable", "attributes": {}}, MOTOR]
+    VOZ_TOCANDO = [{"entity_id": "media_player.living", "state": "playing", "attributes": {}}, MOTOR]
+    SEM_ALTO_FALANTE = {"IQ_BRIEFING_SPEAKER": "", "IQ_BRIEFING_TTS_ENGINE": "", "IQ_BRIEFING_SATELLITE": ""}
+    SEM_SATELITE = {"IQ_BRIEFING_SATELLITE": ""}
+
+    def setUp(self) -> None:
+        patcher = mock.patch("iq_edge.briefing._ai_client", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = mock.patch.dict(os.environ, self.ENV)
+        env.start()
+        self.addCleanup(env.stop)
+        self._zerar()
+
+    def _zerar(self) -> None:
+        self.relogio = _RelogioFalso()
+        # na ordem: ("fala", t), ("reserva", t), ("volume", n), ("espera", s) e ("fim", spoken, idioma, t)
+        self.eventos: list[tuple] = []
+        self.falas: list[str] = []
+
+    def _handle(self, texto="bom dia automatico", estados=None, *, chamada=0.0, chamada_reserva=0.0, toca=True, anuncia=True,
+                done=None, **mais):
+        """`chamada`/`chamada_reserva`: quanto a voz e a reserva demoram para voltar (0 = voltam na hora, como o Sonos, que
+        responde antes de a fala acabar); `toca`/`anuncia`: o que devolvem (ou a excecao que levantam)."""
+
+        def speak(fala, idioma, cfg):
+            self.eventos.append(("fala", self.relogio.agora))
+            self.falas.append(fala)
+            self.relogio.agora += chamada
+            if isinstance(toca, BaseException):
+                raise toca
+            return toca
+
+        def announce(fala, satelite):
+            self.eventos.append(("reserva", self.relogio.agora))
+            self.falas.append(fala)
+            self.relogio.agora += chamada_reserva
+            if isinstance(anuncia, BaseException):
+                raise anuncia
+            return anuncia
+
+        def fim(spoken, idioma):
+            self.eventos.append(("fim", spoken, idioma, self.relogio.agora))
+
+        return briefing.handle(
+            texto,
+            fetch_states_fn=lambda: (ESTADOS + self.VOZ_OK) if estados is None else estados,
+            fetch_forecast_fn=lambda e: PREVISAO,
+            fetch_feed_fn=lambda url, n: ["Manchete"],
+            publish_fn=lambda c, d: True,
+            client=None,
+            feeds=[("Orlando", "https://o")],
+            speak_fn=speak,
+            announce_fn=announce,
+            spawn_fn=lambda f: f(),
+            sleep_fn=self.relogio.dormir,
+            clock_fn=self.relogio,
+            done_fn=done or fim,
+            **mais,
+        )
+
+    def _fim(self) -> list[tuple]:
+        return [e for e in self.eventos if e[0] == "fim"]
+
+    def test_fala_que_volta_na_hora_espera_o_tempo_estimado_da_fala(self) -> None:
+        # o Sonos responde antes de a fala acabar: o evento so sai depois do tempo estimado, contado do comeco dela
+        self.assertEqual(self._handle(), "Um instante.")
+        self.assertEqual(len(self._fim()), 1)
+        _, spoken, idioma, quando = self._fim()[0]
+        estimado = briefing._estimar_duracao(self.falas[0])
+        self.assertEqual((spoken, idioma), (True, "pt"))
+        self.assertAlmostEqual(quando, self.eventos[0][1] + estimado)
+        self.assertEqual([e[0] for e in self.eventos], ["fala", "fim"])
+        self.assertEqual(len(self.relogio.dormiu), 2)
+        self.assertEqual(self.relogio.dormiu[0], 0.0)  # o atraso do pedido automatico (nao ha "Um instante." para esperar)
+        self.assertAlmostEqual(self.relogio.dormiu[1], estimado)
+
+    def test_chamada_que_volta_no_meio_da_fala_espera_so_o_resto(self) -> None:
+        self._handle(chamada=8.0)
+        estimado = briefing._estimar_duracao(self.falas[0])
+        self.assertGreater(estimado, 8.0)
+        self.assertEqual(len(self._fim()), 1)
+        self.assertAlmostEqual(self.relogio.dormiu[1], estimado - 8.0)
+        self.assertAlmostEqual(self._fim()[0][3], estimado)  # o comeco da fala foi em 0
+
+    def test_chamada_que_volta_depois_do_fim_da_fala_nao_espera_mais(self) -> None:
+        self._handle(chamada=300.0)
+        self.assertLess(briefing._estimar_duracao(self.falas[0]), 300.0)
+        self.assertEqual(self.relogio.dormiu, [0.0])  # so o atraso: nenhuma espera a mais
+        self.assertEqual(len(self._fim()), 1)
+        self.assertAlmostEqual(self._fim()[0][3], 300.0)  # sai logo que a chamada volta
+
+    def test_o_evento_sai_depois_de_o_volume_voltar(self) -> None:
+        leituras = [0.72, 0.65]
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_SPEAKER_VOLUME": "65"}):
+            self._handle(
+                get_volume_fn=lambda entidade: leituras.pop(0),
+                set_volume_fn=lambda entidade, nivel: self.eventos.append(("volume", nivel)) or True,
+                wait_fn=lambda entidade, minimo: self.eventos.append(("espera", minimo)) or self.relogio.dormir(minimo),
+            )
+        self.assertEqual([e[0] for e in self.eventos], ["volume", "fala", "espera", "volume", "fim"])
+        self.assertEqual([e[1] for e in self.eventos if e[0] == "volume"], [0.65, 0.72])
+        # a espera do volume ja passou do tempo estimado: o evento sai logo depois, sem espera a mais
+        self.assertEqual(len(self.relogio.dormiu), 2)  # o atraso e a espera do volume
+        self.assertEqual(len(self._fim()), 1)
+
+    def test_o_evento_leva_o_idioma_do_bom_dia(self) -> None:
+        self._handle(idioma_pedido="en")
+        self.assertEqual([e[1:3] for e in self._fim()], [(True, "en")])
+
+    def test_bom_dia_preparado_tambem_avisa_o_fim(self) -> None:
+        pronto = {"text": "Hoje tem obras na avenida.", "language": "pt", "cards": [], "weather_card": False}
+        self.assertEqual(self._handle(pronto=pronto), "Um instante.")
+        self.assertTrue(self.falas[0].endswith("Hoje tem obras na avenida."))
+        self.assertEqual([e[1:3] for e in self._fim()], [(True, "pt")])
+
+    def test_nada_falado_avisa_na_hora_com_spoken_false(self) -> None:
+        casos = (
+            ("sem alto-falante nem satelite", self.SEM_ALTO_FALANTE, None, {}),
+            ("alto-falante fora do ar e sem satelite", self.SEM_SATELITE, ESTADOS + self.VOZ_FORA, {}),
+            ("alto-falante ocupado (modo voice) e sem satelite", self.SEM_SATELITE, ESTADOS + self.VOZ_TOCANDO, {}),
+            ("a voz falhou e sem satelite", self.SEM_SATELITE, None, {"toca": False}),
+            ("a voz falhou e a reserva tambem", {}, None, {"toca": False, "anuncia": False}),
+        )
+        for nome, env, estados, mais in casos:
+            with self.subTest(nome), mock.patch.dict(os.environ, env):
+                self._zerar()
+                self.assertEqual(self._handle(estados=estados, **mais), "Um instante.")
+                self.assertEqual([e[1:3] for e in self._fim()], [(False, "pt")])  # um so, com spoken false
+                self.assertEqual(self.relogio.agora, 0.0)  # na hora: nada esperou pelo tempo da fala
+
+    def test_erro_na_voz_conta_como_nada_falado(self) -> None:
+        with mock.patch.dict(os.environ, self.SEM_SATELITE), self.assertLogs("iq_edge.briefing", level="WARNING"):
+            self._handle(toca=RuntimeError("elevenlabs fora do ar"))
+        self.assertEqual([e[1:3] for e in self._fim()], [(False, "pt")])
+        self.assertEqual(self.relogio.agora, 0.0)
+
+    def test_ha_fora_avisa_na_hora_com_spoken_false(self) -> None:
+        preparado = {"text": "Hoje tem obras.", "language": "pt", "cards": [], "weather_card": False}
+        for nome, pronto in (("composto na hora", None), ("preparado", preparado)):
+            with self.subTest(nome):
+                self._zerar()
+                self.assertIn("Não consegui falar com a casa", self._handle(estados=[], pronto=pronto))
+                self.assertEqual(self.falas, [])
+                self.assertEqual([e[1:3] for e in self._fim()], [(False, "pt")])
+                self.assertEqual(self.relogio.agora, 0.0)
+
+    def test_a_reserva_do_satelite_conta_como_fala(self) -> None:
+        # a voz falha depois de 5 s e o satelite fala: um so evento, spoken true, depois do tempo estimado contado do anuncio
+        self._handle(toca=False, chamada=5.0)
+        self.assertEqual([e[0] for e in self.eventos], ["fala", "reserva", "fim"])
+        _, spoken, idioma, quando = self._fim()[0]
+        self.assertEqual((spoken, idioma), (True, "pt"))
+        self.assertAlmostEqual(quando, 5.0 + briefing._estimar_duracao(self.falas[1]))
+
+    def test_so_o_satelite_fala(self) -> None:
+        fora = ESTADOS + self.VOZ_FORA  # sem alto-falante: o aparelho de voz de reserva fala sozinho
+        self._handle(estados=fora)
+        self.assertEqual([e[0] for e in self.eventos], ["reserva", "fim"])
+        estimado = briefing._estimar_duracao(self.falas[0])
+        self.assertEqual([e[1:3] for e in self._fim()], [(True, "pt")])
+        self.assertAlmostEqual(self._fim()[0][3], estimado)
+        self.assertAlmostEqual(self.relogio.dormiu[0], estimado)
+        self._zerar()  # o anuncio volta no meio da fala: so o resto
+        self._handle(estados=fora, chamada_reserva=8.0)
+        self.assertAlmostEqual(self._fim()[0][3], estimado)
+        self._zerar()  # o anuncio falha: spoken false, na hora
+        self._handle(estados=fora, anuncia=False)
+        self.assertEqual([e[1:3] for e in self._fim()], [(False, "pt")])
+        self.assertEqual(self.relogio.agora, 0.0)
+        self._zerar()  # o anuncio levanta um erro: o evento sai assim mesmo e o erro segue, como antes
+        with self.assertRaises(RuntimeError):
+            self._handle(estados=fora, anuncia=RuntimeError("satelite fora do ar"))
+        self.assertEqual([e[1:3] for e in self._fim()], [(False, "pt")])
+
+    def test_um_evento_por_bom_dia(self) -> None:
+        for mais in ({}, {"chamada": 300.0}, {"toca": False}, {"toca": False, "anuncia": False}, {"estados": ESTADOS + self.VOZ_FORA}):
+            self._zerar()
+            self._handle(**mais)
+            self.assertEqual(len(self._fim()), 1, mais)
+
+    def test_pedido_de_voz_nao_avisa(self) -> None:
+        # "bom dia" (sem "automatico") fala no alto-falante e devolve "Um instante.": nada de evento nem de espera a mais
+        self.assertEqual(self._handle("bom dia"), "Um instante.")
+        self.assertEqual(self._fim(), [])
+        self.assertEqual(self.relogio.dormiu, [2.0])  # so o atraso do "Um instante."
+        # sem alto-falante o texto volta ao aparelho de voz; com o HA fora, a mensagem de falha: tambem sem evento
+        self._zerar()
+        with mock.patch.dict(os.environ, self.SEM_ALTO_FALANTE):
+            self.assertTrue(self._handle("bom dia").startswith("Bom dia"))
+        self.assertTrue(self._handle("bom dia", estados=[]).startswith("Não consegui"))
+        self.assertEqual(self._fim(), [])
+        # a voz falha e a reserva fala: tambem sem evento
+        self._zerar()
+        self._handle("bom dia", toca=False)
+        self.assertEqual([e[0] for e in self.eventos], ["fala", "reserva"])
+
+    def test_erro_ao_avisar_nao_derruba_o_bom_dia(self) -> None:
+        def quebra(spoken, idioma):
+            raise RuntimeError("ha fora do ar")
+
+        # a voz fala e o aviso falha: o Bom dia ja saiu e o erro vira so um aviso no registro
+        with self.assertLogs("iq_edge.briefing", level="WARNING") as registro:
+            self.assertEqual(self._handle(done=quebra), "Um instante.")
+        self.assertEqual(len(self.falas), 1)
+        self.assertTrue(any("fim do Bom dia" in linha for linha in registro.output))
+        # nada falado: idem
+        self._zerar()
+        with mock.patch.dict(os.environ, self.SEM_ALTO_FALANTE), self.assertLogs("iq_edge.briefing", level="WARNING"):
+            self.assertEqual(self._handle(done=quebra), "Um instante.")
+        # o HA fora do ar: idem
+        self._zerar()
+        with self.assertLogs("iq_edge.briefing", level="WARNING"):
+            self.assertIn("Não consegui falar com a casa", self._handle(estados=[], done=quebra))
+
+
+class PublishDoneTest(unittest.TestCase):
+    """publish_done: POST /api/events/iq_bom_dia_done {spoken, language}. Melhor esforco: um erro vira so um aviso no registro."""
+
+    def _ha(self, token="token-de-teste"):
+        return mock.patch.multiple(briefing, HA_URL="http://ha.test/core", HA_TOKEN=token)
+
+    def test_manda_o_evento_com_os_dados(self) -> None:
+        with self._ha(), mock.patch.object(briefing.requests, "post") as post:
+            self.assertTrue(briefing.publish_done(True, "pt"))
+            self.assertTrue(briefing.publish_done(False, "en"))
+        primeira, segunda = post.call_args_list
+        self.assertEqual(primeira.args, ("http://ha.test/core/api/events/iq_bom_dia_done",))
+        self.assertEqual(primeira.kwargs["json"], {"spoken": True, "language": "pt"})
+        self.assertEqual(segunda.kwargs["json"], {"spoken": False, "language": "en"})
+        self.assertEqual(primeira.kwargs["headers"]["Authorization"], "Bearer token-de-teste")
+        self.assertEqual(primeira.kwargs["timeout"], 8)
+
+    def test_erro_vira_so_um_aviso(self) -> None:
+        recusa = mock.Mock()
+        recusa.raise_for_status.side_effect = briefing.requests.HTTPError("401")
+        falhas = (
+            mock.patch.object(briefing.requests, "post", side_effect=briefing.requests.ConnectionError("fora")),
+            mock.patch.object(briefing.requests, "post", side_effect=briefing.requests.Timeout("lento")),
+            mock.patch.object(briefing.requests, "post", return_value=recusa),
+        )
+        for falha in falhas:
+            with self._ha(), falha, self.assertLogs("iq_edge.briefing", level="WARNING") as registro:
+                self.assertFalse(briefing.publish_done(True, "pt"))
+            self.assertEqual(len(registro.output), 1)
+            self.assertNotIn("Traceback", registro.output[0])
+
+    def test_sem_token_nem_tenta(self) -> None:
+        with self._ha(token=""), mock.patch.object(briefing.requests, "post") as post:
+            self.assertFalse(briefing.publish_done(True, "pt"))
+        post.assert_not_called()
+
+
 # --------------------------------------------------------------------------
 # Lote H2: preferencias vindas do centro (arquivo) e as rotas do contrato v1
 # --------------------------------------------------------------------------

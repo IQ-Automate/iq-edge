@@ -29,6 +29,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(config['options'], {'center_url': 'https://business.iqautom8.com', 'pairing_code': ''})
         # lote A5: the Bom dia's options are all optional (out of `options`, so they stay unset until someone fills them in)
         self.assertEqual(set(config['schema']), {'center_url', 'pairing_code'} | set(settings.BRIEFING_OPTIONS))
+        self.assertEqual(config['schema']['greet_names'], 'bool?')  # 0.2.2: a switch; unset = on (the code's default)
         for key, kind in config['schema'].items():
             if key != 'center_url':
                 self.assertTrue(kind.endswith('?'), key)
@@ -73,19 +74,39 @@ class BriefingOptionsTests(EdgeCase):
             'center_url': 'https://business.iqautom8.com', 'pairing_code': '', 'weather_entity': 'weather.casa',
             'temp_sensor': 'sensor.fora', 'satellite': 'assist_satellite.cozinha', 'tts_voice': 'voz-pt', 'tts_voice_en': '',
             'speaker_delay': 3.5, 'speaker_wait': 12, 'speaker_busy': 'interrupt', 'card_seconds': 60, 'prepare_minutes': 45,
-            'prepare_at': '05:45'}, private=False)
+            'prepare_at': '05:45', 'greet_names': False}, private=False)
         applied = settings.apply_briefing_options()
         self.assertEqual(set(applied), set(settings.BRIEFING_OPTIONS) - {'tts_voice_en'})  # an empty option sets nothing
         self.assertEqual((os.environ['IQ_BRIEFING_WEATHER_ENTITY'], os.environ['IQ_BRIEFING_TEMP_SENSOR'], os.environ['IQ_BRIEFING_CARD_SECONDS'],
                           os.environ['IQ_BRIEFING_PREPARE_MINUTES'], os.environ['IQ_BRIEFING_PREPARE_AT']),
                          ('weather.casa', 'sensor.fora', '60', '45', '05:45'))
         self.assertNotIn('IQ_BRIEFING_TTS_VOICE_EN', os.environ)
+        self.assertEqual(os.environ['IQ_BRIEFING_GREET_NAMES'], 'False')  # the Supervisor's JSON false, as text
         from iq_edge import briefing, prefs, schedule
+        self.assertFalse(briefing._nomes_ligados())
         prefs.save_local(self.prefs())
         cfg = briefing.speaker_config()
         self.assertEqual((cfg['atraso'], cfg['espera'], cfg['ocupado'], cfg['voz_pt'], cfg['voz_en'], cfg['satellite']),
                          (3.5, 12.0, 'interromper', 'voz-pt', 'voz-pt', 'assist_satellite.cozinha'))
         self.assertEqual((briefing.satellite(), schedule.prepare_minutes()), ('assist_satellite.cozinha', 45))
+
+    def test_greet_names_true_false_or_unset(self):
+        """0.2.2: `greet_names` is a boolean: the Supervisor writes JSON true/false; unset (or no options file) means on, as before."""
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        from iq_edge import briefing
+        for options, variable, on in (({'greet_names': False}, 'False', False), ({'greet_names': True}, 'True', True), ({}, None, True)):
+            os.environ.pop('IQ_BRIEFING_GREET_NAMES', None)
+            settings.write_json(settings.data_dir() / 'options.json', dict(options, center_url='https://business.iqautom8.com'), private=False)
+            applied = settings.apply_briefing_options()
+            self.assertEqual(os.environ.get('IQ_BRIEFING_GREET_NAMES'), variable, options)
+            self.assertEqual('greet_names' in applied, variable is not None, options)
+            self.assertEqual(briefing._nomes_ligados(), on, options)
+        os.environ.pop('IQ_BRIEFING_GREET_NAMES', None)
+        (settings.data_dir() / 'options.json').unlink()  # no options file at all
+        self.assertEqual(settings.apply_briefing_options(), [])
+        self.assertTrue(briefing._nomes_ligados())
 
 
 if __name__ == '__main__':

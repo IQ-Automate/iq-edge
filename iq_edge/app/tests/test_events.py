@@ -3,6 +3,7 @@ add-on's token, the subscription, one speech per event (language from event_data
 messages and ping frames, Home Assistant's own ping after a silence, reconnection with back-off and a refused token."""
 import os
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -182,6 +183,53 @@ class SpeakNowTests(EdgeCase):
         self.assertEqual(text, 'One moment.')
         self.assertTrue(said[0][0].startswith('Good morning, Franco.'))
         self.assertEqual(said[0][1], 'assist_satellite.cozinha')
+
+
+class EndEventTests(EdgeCase):
+    """0.2.2: the Bom dia tells Home Assistant when it ends with the event iq_bom_dia_done {spoken, language} (the fake HA records
+    the events it receives). One per Bom dia, after the voice call; at once, with spoken false, when nothing can speak."""
+
+    def wait_for_event(self):
+        for _ in range(100):
+            if self.ha.done_events():
+                return
+            time.sleep(0.05)
+        self.fail('no iq_bom_dia_done')
+
+    def test_the_event_comes_once_after_the_voice_call(self):
+        prefs.save_local(self.prefs())  # the speaker and the voice engine of the fake HA
+        with mock.patch.object(briefing, '_estimar_duracao', return_value=0.3):  # the real estimate (about 10 s) would be slow
+            self.assertEqual(prefs.speak_now('pt')[0], True)
+            self.wait_for_event()
+            time.sleep(0.5)  # a second event would be here by now
+        self.assertEqual(self.ha.done_events(), [{'spoken': True, 'language': 'pt'}])
+        calls = [path for _, path in self.ha.log if path in ('/core/api/services/tts/speak', '/core/api/events/iq_bom_dia_done')]
+        self.assertEqual(calls, ['/core/api/services/tts/speak', '/core/api/events/iq_bom_dia_done'])  # the voice call first
+
+    def test_nothing_to_speak_on_fires_spoken_false_at_once(self):
+        with mock.patch.dict(os.environ, {'IQ_BRIEFING_SATELLITE': ''}):
+            self.assertEqual(prefs.speak_now('en'), (False, ''))
+        self.assertEqual(self.ha.done_events(), [{'spoken': False, 'language': 'en'}])
+
+    def test_an_error_before_the_speech_fires_spoken_false_once_and_is_raised(self):
+        prefs.save_local(self.prefs())
+        with mock.patch.object(briefing, 'handle', side_effect=RuntimeError('boom')):
+            with self.assertRaises(RuntimeError):
+                prefs.speak_now('pt')
+        self.assertEqual(self.ha.done_events(), [{'spoken': False, 'language': 'pt'}])
+
+    def test_speak_now_does_not_double_the_event_that_handle_owns(self):
+        prefs.save_local(self.prefs())
+        with mock.patch.object(briefing, 'handle', return_value='Um instante.'):
+            self.assertEqual(prefs.speak_now('pt'), (True, 'Um instante.'))
+        self.assertEqual(self.ha.done_events(), [])  # briefing.handle sends it, at the end of the speech
+
+    def test_the_home_assistant_down_still_ends_with_spoken_false(self):
+        prefs.save_local(self.prefs())
+        with mock.patch.object(briefing, 'fetch_states', side_effect=RuntimeError('down')), \
+                self.assertLogs('iq_edge.briefing', level='WARNING'):
+            self.assertEqual(prefs.speak_now('pt')[1], briefing._T['pt']['falha_casa'])
+        self.assertEqual(self.ha.done_events(), [{'spoken': False, 'language': 'pt'}])
 
 
 if __name__ == '__main__':

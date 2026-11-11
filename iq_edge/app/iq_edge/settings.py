@@ -99,6 +99,7 @@ BRIEFING_OPTIONS = {
     'card_seconds': 'IQ_BRIEFING_CARD_SECONDS',
     'prepare_minutes': 'IQ_BRIEFING_PREPARE_MINUTES',
     'prepare_at': 'IQ_BRIEFING_PREPARE_AT',
+    'greet_names': 'IQ_BRIEFING_GREET_NAMES',
 }
 
 

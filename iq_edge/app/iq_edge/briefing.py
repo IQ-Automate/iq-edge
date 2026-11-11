@@ -47,6 +47,10 @@ Configuracao (variaveis lidas na hora, todas opcionais):
                               mostra o estado da casa (aberto/fechado, alarme); fica so
                               cumprimento (com os nomes), clima e noticias
   IQ_BRIEFING_CLIMA           sim (padrao) ou nao: com "nao", sem clima (fala e cartao)
+  IQ_BRIEFING_GREET_NAMES     sim (padrao) ou nao/no/off/0/false: com "nao", nenhum nome de quem
+                              esta em casa vira texto: a fala diz so "Bom dia.", o cartao Casa
+                              nao tem "Em casa: ..." e o pedido ao centro leva `names` vazio
+                              (opcao greet_names do add-on; o centro nao tem preferencia disto)
   IQ_BRIEFING_TOTAL           total de noticias somando as fontes, ex.: "6-7" (sem padrao)
   IQ_BRIEFING_PREFS_FILE      arquivo das preferencias vindas do centro (lote H2; padrao
                               /opt/iq-assistant/data/briefing-prefs.json)
@@ -89,6 +93,12 @@ alto-falante nao estiver disponivel, o resumo e falado pelo IQ_BRIEFING_SATELLIT
 Com isso o aparelho de voz responde so "Um instante." e o resumo inteiro sai no
 alto-falante escolhido. Sem isso (ou se o alto-falante/a voz nao estiverem
 disponiveis na hora), o aparelho de voz fala o resumo todo, como antes.
+
+FIM DA FALA (0.2.2): no pedido automatico ("Falar agora", horario e evento iq_bom_dia) o add-on avisa o HA, no fim, com o
+evento `iq_bom_dia_done` {spoken, language}, para uma automacao esperar a fala acabar (ex.: comecar a musica depois). Sai
+depois da chamada de voz, de o volume voltar e do tempo estimado da fala, contado do comeco dela (o Sonos responde antes
+do fim); sem fala nenhuma (sem alto-falante nem satelite, HA fora, falha na voz, alto-falante ocupado), sai na hora com
+spoken false. Um evento por Bom dia. O pedido de voz (que devolve o texto ao aparelho de voz) nao avisa.
 """
 
 from __future__ import annotations
@@ -484,6 +494,26 @@ def publish_cards(cards: list[dict[str, Any]], duracao: int) -> bool:
         return False
 
 
+def publish_done(spoken: bool, idioma: str) -> bool:
+    """Avisa o HA que o Bom dia automatico terminou: evento `iq_bom_dia_done` {spoken, language}, para uma automacao esperar
+    a fala acabar (ex.: comecar a musica depois). Melhor esforco, como publish_cards: um erro vira so um aviso no registro."""
+    if not HA_URL or not HA_TOKEN:
+        return False
+    try:
+        resposta = requests.post(
+            f"{HA_URL}/api/events/iq_bom_dia_done",
+            headers=_ha_headers(),
+            json={"spoken": bool(spoken), "language": idioma},
+            timeout=8,
+        )
+        resposta.raise_for_status()
+        logger.info("Bom dia: avisei o HA que terminou (spoken=%s).", "true" if spoken else "false")
+        return True
+    except requests.RequestException as erro:
+        logger.warning("Resumo: nao consegui avisar o HA do fim do Bom dia (%s).", erro.__class__.__name__)
+        return False
+
+
 _CONDICOES = {
     "clear-night": ("céu limpo", "clear", "mdi:weather-night"),
     "cloudy": ("nublado", "cloudy", "mdi:weather-cloudy"),
@@ -812,7 +842,8 @@ def _converter(valor: Any, origem: str, destino: str) -> Any:
 
 
 def _cartao_casa(dados: dict[str, Any], idioma: str) -> dict[str, Any]:
-    """O cartao "Casa": o que esta aberto (ou tudo fechado), o alarme e quem esta em casa."""
+    """O cartao "Casa": o que esta aberto (ou tudo fechado), o alarme e quem esta em casa (sem a linha dos nomes com
+    greet_names desligado)."""
     t = _T[idioma]
     linhas_casa: list[str] = []
     alerta = False
@@ -829,7 +860,7 @@ def _cartao_casa(dados: dict[str, Any], idioma: str) -> dict[str, Any]:
         linhas_casa.append(t["alarme"].format(estado=t["armado"]))
     elif alarme == "disarmed":
         linhas_casa.append(t["alarme"].format(estado=t["desarmado"]))
-    if dados.get("pessoas"):
+    if _nomes_ligados() and dados.get("pessoas"):
         linhas_casa.append(t["em_casa"].format(nomes=", ".join(dados["pessoas"])))
     return {
         "icone": "mdi:door-open" if dados.get("abertos") else "mdi:home-lock",
@@ -891,6 +922,12 @@ def _casa_ligada() -> bool:
     return os.getenv("IQ_BRIEFING_CASA", "").strip().lower() not in ("nao", "não", "0", "off")
 
 
+def _nomes_ligados() -> bool:
+    """IQ_BRIEFING_GREET_NAMES (opcao greet_names do add-on; o Supervisor manda true/false): False (nao/não/no/0/false/off)
+    tira o nome de quem esta em casa de tudo o que vira texto (fala, cartao Casa, pedido ao centro). A coleta nao muda."""
+    return os.getenv("IQ_BRIEFING_GREET_NAMES", "").strip().lower() not in ("nao", "não", "no", "0", "false", "off")
+
+
 def _lista_nomes(nomes: list[str], idioma: str) -> str:
     if len(nomes) <= 1:
         return "".join(nomes)
@@ -899,9 +936,9 @@ def _lista_nomes(nomes: list[str], idioma: str) -> str:
 
 
 def _saudacao(dados: dict[str, Any], idioma: str) -> str:
-    """ "Bom dia, Victtor e Matheus." (os nomes de quem esta em casa agora)."""
+    """ "Bom dia, Victtor e Matheus." (os nomes de quem esta em casa agora); com greet_names desligado, so "Bom dia."."""
     saudacao = _T[idioma]["bom_dia"]
-    if dados.get("pessoas"):
+    if _nomes_ligados() and dados.get("pessoas"):
         saudacao += ", " + _lista_nomes(dados["pessoas"], idioma)
     return saudacao + "."
 
@@ -918,8 +955,9 @@ def _frases_casa(dados: dict[str, Any], idioma: str) -> list[str]:
 
 
 def prefixo_da_hora(dados: dict[str, Any], idioma: str) -> str:
-    """O comeco da fala do Bom dia preparado, montado NA HORA de falar: cumprimento com quem esta em casa agora e, com o
-    estado da casa ligado, as frases fixas do que esta aberto e do alarme (nunca ficam velhos)."""
+    """O comeco da fala do Bom dia preparado, montado NA HORA de falar: cumprimento com quem esta em casa agora (so "Bom
+    dia." com greet_names desligado) e, com o estado da casa ligado, as frases fixas do que esta aberto e do alarme
+    (nunca ficam velhos)."""
     return " ".join([_saudacao(dados, idioma)] + (_frases_casa(dados, idioma) if _casa_ligada() else []))
 
 
@@ -1108,10 +1146,12 @@ def pedido_ia(
     houver; aberto e alarme so com o estado da casa ligado; manchetes candidatas por fonte (ate 20 fontes, 30 titulos de
     ate 300 caracteres) com o limite de cada uma; fonte sem titulo ou com limite 0 nao vai. Acima de ~60 KB, saem os
     ultimos titulos das fontes mais longas (os indices continuam valendo: so o fim da lista sai). `preparo` (o Bom dia
-    preparado antes): sem nomes e sem a casa, que entram na hora de falar. Limites do centro (cortados aqui para nunca
-    receber 422): ate 20 nomes de 80 caracteres, 60 itens abertos de 120, clima e alarme de 40, unidade so "C"/"F" (sem
-    unidade conhecida, o clima nao vai), `limit` 0 a 6, regras 2000, palavras 40 a 300, total 1 a 20."""
+    preparado antes): sem nomes e sem a casa, que entram na hora de falar. Com greet_names desligado, `names` vai sempre
+    vazio. Limites do centro (cortados aqui para nunca receber 422): ate 20 nomes de 80 caracteres, 60 itens abertos de
+    120, clima e alarme de 40, unidade so "C"/"F" (sem unidade conhecida, o clima nao vai), `limit` 0 a 6, regras 2000,
+    palavras 40 a 300, total 1 a 20."""
     casa = _casa_ligada() and not preparo
+    nomes = [] if preparo or not _nomes_ligados() else dados.get("pessoas") or []
     clima = None
     if dados.get("clima"):
         c = _clima_resumido(dados, previsao, idioma)
@@ -1141,7 +1181,7 @@ def pedido_ia(
         "rules": regras,
         "house_state": casa,
         "facts": {
-            "names": [] if preparo else [n for n in (_curto(p, 80) for p in dados.get("pessoas") or []) if n][:20],
+            "names": [n for n in (_curto(p, 80) for p in nomes) if n][:20],
             "weather": clima,
             "open": [a for a in (_curto(x, 120) for x in dados.get("abertos") or []) if a][:60] if casa else [],
             "alarm": _curto(_alarme_dito(dados.get("alarme"), idioma), 40) if casa else None,
@@ -1466,13 +1506,18 @@ def _entregar_no_alto_falante(
     get_volume_fn: Callable[[str], float | None] | None = None,
     set_volume_fn: Callable[[str, float], bool] | None = None,
     wait_fn: Callable[[str, float], None] | None = None,
+    done_fn: Callable[[bool, str], Any] | None = None,
+    clock_fn: Callable[[], float] | None = None,
 ) -> None:
     """Espera o aparelho de voz terminar o "Um instante." e toca o resumo. Se
     nao der, cai na reserva (satelite) em vez de ficar em silencio.
 
     Com `volume` configurado, o alto-falante fala nesse volume e depois volta ao
     que estava -- mas so se ninguem mexeu no volume durante a fala, e nunca se o
-    volume anterior nao pode ser lido (melhor nao mexer do que deixar errado)."""
+    volume anterior nao pode ser lido (melhor nao mexer do que deixar errado).
+
+    `done_fn` (so no Bom dia automatico): no fim, depois da voz e do volume, avisa o HA uma vez (_avisar_fim)."""
+    relogio = clock_fn or time.monotonic
     sleep_fn(cfg["atraso"])
     get_volume = get_volume_fn or get_speaker_volume
     set_volume = set_volume_fn or set_speaker_volume
@@ -1488,10 +1533,12 @@ def _entregar_no_alto_falante(
             logger.warning("Resumo: erro ao ajustar o volume.", exc_info=True)
             anterior = None
     ok = False
+    inicio = relogio()  # o comeco da fala, para o aviso de fim
     try:
         ok = speak_fn(fala, idioma, cfg)
     except Exception:
         logger.warning("Resumo: erro ao tocar no alto-falante.", exc_info=True)
+    falou = bool(ok)
     if anterior is not None:
         try:
             if ok:
@@ -1502,10 +1549,54 @@ def _entregar_no_alto_falante(
         except Exception:
             logger.warning("Resumo: erro ao restaurar o volume.", exc_info=True)
     if not ok and cfg.get("satellite"):
+        inicio = relogio()
         try:
-            announce_fn(fala, cfg["satellite"])
+            falou = bool(announce_fn(fala, cfg["satellite"]))
         except Exception:
             logger.warning("Resumo: erro na reserva do satelite.", exc_info=True)
+    _avisar_fim(done_fn, idioma, falou, fala, inicio, sleep_fn, relogio)
+
+
+def _anunciar_no_satelite(
+    fala: str,
+    idioma: str,
+    satelite: str,
+    announce_fn: Callable[[str, str], bool],
+    done_fn: Callable[[bool, str], Any],
+    sleep_fn: Callable[[float], None],
+    clock_fn: Callable[[], float],
+) -> None:
+    """O Bom dia automatico sem alto-falante: so o aparelho de voz de reserva fala. No fim, avisa o HA (_avisar_fim)."""
+    inicio, falou = clock_fn(), False
+    try:
+        falou = bool(announce_fn(fala, satelite))
+    finally:
+        _avisar_fim(done_fn, idioma, falou, fala, inicio, sleep_fn, clock_fn)
+
+
+def _avisar_fim(
+    done_fn: Callable[[bool, str], Any] | None,
+    idioma: str,
+    falou: bool = False,
+    fala: str = "",
+    inicio: float = 0.0,
+    sleep_fn: Callable[[float], None] | None = None,
+    clock_fn: Callable[[], float] | None = None,
+) -> None:
+    """O fim do Bom dia automatico: avisa o HA (`done_fn`, publish_done) UMA vez. `falou` (a fala foi tocada): so depois do
+    tempo estimado da fala, contado do `inicio` dela -- um alto-falante como o Sonos responde antes de a fala acabar. Sem
+    fala: na hora, com spoken false. Sem `done_fn` (pedido de voz): nada. Um erro aqui vira so um aviso: nunca derruba nem
+    atrasa o Bom dia."""
+    if done_fn is None:
+        return
+    try:
+        if falou:
+            resto = _estimar_duracao(fala) - ((clock_fn or time.monotonic)() - inicio)
+            if resto > 0:
+                (sleep_fn or time.sleep)(resto)
+        done_fn(falou, idioma)
+    except Exception:
+        logger.warning("Resumo: nao consegui avisar o HA do fim do Bom dia.", exc_info=True)
 
 
 def _dados_da_casa(estados: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1681,12 +1772,16 @@ def handle(
     wait_fn: Callable[[str, float], None] | None = None,
     idioma_pedido: str | None = None,
     pronto: dict[str, Any] | None = None,
+    done_fn: Callable[[bool, str], Any] | None = None,
+    clock_fn: Callable[[], float] | None = None,
 ) -> str | None:
     """Se `texto` pede o resumo, devolve a fala (e publica os cartoes no
     painel). Se nao pede, devolve None e quem chamou segue o fluxo normal.
     `idioma_pedido` ("pt"/"en", ex.: o `language` do evento iq_bom_dia) vale no lugar do idioma salvo.
     `pronto` (o Bom dia preparado, ready.fresh): no pedido automatico, a fala e o prefixo da hora (cumprimento e casa
-    com os estados de agora) + o texto pronto, sem RSS nem IA; idioma diferente = compoe na hora."""
+    com os estados de agora) + o texto pronto, sem RSS nem IA; idioma diferente = compoe na hora.
+    `done_fn` (padrao publish_done) e `clock_fn` (padrao time.monotonic): so o pedido automatico avisa o HA, com o evento
+    iq_bom_dia_done, quando a fala termina (ou na hora, com spoken false, se nada for falado); o pedido de voz nao."""
     idioma = detect_briefing(texto)
     if idioma is None:
         return None
@@ -1700,6 +1795,8 @@ def handle(
     duracao = max(10, min(300, int(os.getenv("IQ_BRIEFING_CARD_SECONDS", "40") or 40)))
 
     automatico = "automatico" in _normalizar(texto).split()
+    fim = (done_fn or publish_done) if automatico else None  # o aviso de fim (iq_bom_dia_done) e so do pedido automatico
+    relogio = clock_fn or time.monotonic
     if automatico and isinstance(pronto, dict) and pronto.get("language") == idioma and isinstance(pronto.get("text"), str):
         try:
             estados = estados_fn()
@@ -1707,6 +1804,7 @@ def handle(
             logger.warning("Resumo: nao consegui ler os estados do HA.", exc_info=True)
             estados = []
         if not estados:
+            _avisar_fim(fim, idioma)  # HA sem resposta: nada falado
             return _T[idioma]["falha_casa"]
         dados = _dados_da_casa(estados)
         fala = juntar_fala(prefixo_da_hora(dados, idioma), pronto["text"])
@@ -1716,6 +1814,7 @@ def handle(
     else:
         composto = _compor(idioma, estados_fn, fetch_forecast_fn, fetch_feed_fn, client, feeds)
         if composto is None:
+            _avisar_fim(fim, idioma)  # HA sem resposta: nada falado
             return _T[idioma]["falha_casa"]
         fala, noticias, dados, previsao, estados = composto
         cartoes = build_cards(dados, previsao, noticias, idioma)
@@ -1763,6 +1862,8 @@ def handle(
             get_volume_fn,
             set_volume_fn,
             wait_fn,
+            fim,
+            relogio,
         )
         (spawn_fn or (lambda f: threading.Thread(target=f, daemon=True).start()))(tarefa)
         return _T[idioma]["ack"]
@@ -1772,7 +1873,9 @@ def handle(
         satelite = (cfg or {}).get("satellite") or os.getenv("IQ_BRIEFING_SATELLITE", "").strip()
         if satelite:
             anunciar = announce_fn or announce_on_satellite
-            tarefa = lambda: anunciar(fala, satelite)  # noqa: E731
+            tarefa = lambda: _anunciar_no_satelite(fala, idioma, satelite, anunciar, fim, sono, relogio)  # noqa: E731
             (spawn_fn or (lambda f: threading.Thread(target=f, daemon=True).start()))(tarefa)
+        else:
+            _avisar_fim(fim, idioma)  # nada a falar (sem alto-falante nem satelite, ou ocupado): na hora, com spoken false
         return _T[idioma]["ack"]
     return fala
