@@ -92,11 +92,18 @@ def preview(values, language=None):
 def speak_now(language=None):
     """"Falar agora", the schedule and Home Assistant's event iq_bom_dia: the whole Bom dia on the chosen speaker (or, without one,
     on the reserve satellite) in the background. `language` ('pt'/'en') wins over the saved one. The Bom dia prepared ahead
-    (ready.py) is used when it is under 2 hours old; otherwise it is composed now. (spoken?, text)."""
-    if briefing.speaker_config() is None and not briefing.satellite():
-        return False, ''
+    (ready.py) is used when it is under 2 hours old; otherwise it is composed now. (spoken?, text).
+    When the speech ends (at once, with spoken false, when nothing is spoken) Home Assistant gets the event iq_bom_dia_done:
+    one per call, sent by briefing.handle (here only when nothing can speak, or when handle fails before any speech starts)."""
     language = language if language in ('pt', 'en') else briefing.idioma_automatico()
-    text = briefing.handle('bom dia automatico', idioma_pedido=language, pronto=ready.fresh(language)) or ''
+    if briefing.speaker_config() is None and not briefing.satellite():
+        briefing.publish_done(False, language)  # nothing can speak: an automation that waits for the event is not left hanging
+        return False, ''
+    try:
+        text = briefing.handle('bom dia automatico', idioma_pedido=language, pronto=ready.fresh(language)) or ''
+    except Exception:
+        briefing.publish_done(False, language)  # it failed before any speech started
+        raise
     if text != briefing._T[language]['falha_casa']:  # Home Assistant answered: the preparation of this morning can stop
         set_state(last_spoken_at=datetime.now(timezone.utc).isoformat(timespec='seconds'))
     return True, text

@@ -44,6 +44,8 @@ class FakeHA(_Server):
         self.objects = {'automation': {'1': {'id': '1', 'alias': 'Porta'}}, 'script': {}, 'scene': {}}
         # lote A5: the voice cached ahead (tts_get_url + the audio) and the Bom dia's own service calls (tts.speak...)
         self.tts_requests, self.tts_fail, self.service_calls = [], False, []
+        # 0.2.2: the events the add-on fired (POST /api/events/<type>): [(type, data)] (iq_briefing, iq_bom_dia_done)
+        self.events = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -107,6 +109,7 @@ class FakeHA(_Server):
                     fake.service_calls.append((path, json.loads(body) if body else None))
                     return self.answer(200, [])  # the Bom dia's own speech only (tts.speak, volume_set...); the relay never comes here
                 if method == 'POST' and path.startswith('/api/events/'):
+                    fake.events.append((path[len('/api/events/'):], json.loads(body) if body else None))
                     return self.answer(200, {'message': 'Event fired.'})
                 return self.answer(404, {'message': 'Not found'})
 
@@ -123,6 +126,10 @@ class FakeHA(_Server):
 
     def requests_to(self, prefix):
         return [(m, p) for m, p in self.log if p.startswith(prefix)]
+
+    def done_events(self):
+        """The data of every iq_bom_dia_done the add-on fired (the end of the Bom dia's speech)."""
+        return [data for kind, data in self.events if kind == 'iq_bom_dia_done']
 
 
 class FakeCenter(_Server):
@@ -238,6 +245,14 @@ class EdgeCase(unittest.TestCase):
         patches = mock.patch.multiple(briefing, HA_URL=self.ha.url + '/core', HA_TOKEN=TOKEN)
         patches.start()
         self.addCleanup(patches.stop)
+        # 0.2.2: the Bom dia's end event reaches the fake HA while the test runs. A speech thread that outlives its test (it waits
+        # for the estimated end of the speech) must not call a fake that is already stopped: after the test it does nothing.
+        self.fake_ha_alive = True
+        self.addCleanup(setattr, self, 'fake_ha_alive', False)
+        publish_done = briefing.publish_done
+        done = mock.patch.object(briefing, 'publish_done', lambda spoken, language: self.fake_ha_alive and publish_done(spoken, language))
+        done.start()
+        self.addCleanup(done.stop)
 
     def prefs(self, **extra):
         values = {'house_state': True, 'weather': False, 'sources': [{'name': 'Cidade', 'url': self.ha.url + '/rss'}], 'picks': {'Cidade': 2},

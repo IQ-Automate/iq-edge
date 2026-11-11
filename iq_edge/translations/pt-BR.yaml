@@ -38,3 +38,6 @@ configuration:
   prepare_at:
     name: Bom dia — preparar às (HH:MM)
     description: Numa casa sem horário escolhido que usa o evento iq_bom_dia, a hora de começar a preparar (padrão 06:00).
+  greet_names:
+    name: Bom dia — cumprimentar pelo nome
+    description: Cumprimenta pelo nome de quem está em casa (padrão ligado). Desligado, fala só "Bom dia." e não usa nomes.

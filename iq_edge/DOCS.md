@@ -113,6 +113,23 @@ actions:
 
 Dois eventos com menos de 1 minuto de diferença falam uma vez só.
 
+### Depois da fala
+
+Quando o Bom dia termina de falar, o add-on dispara o evento `iq_bom_dia_done` no Home Assistant. Isso vale para **Falar agora**, para o
+horário e para o evento `iq_bom_dia`. O evento leva `spoken` (`true` se o Bom dia foi falado) e `language` (`pt` ou `en`). Se nada foi
+falado (sem alto-falante nem aparelho de reserva, falha na voz ou alto-falante ocupado), o evento sai na hora com `spoken: false`: a
+automação que espera não fica presa. Se o alto-falante responde antes de a fala acabar (como o Sonos), o add-on espera o tempo
+estimado da fala. Use o evento para começar a música ambiente só depois da fala:
+
+```yaml
+- event: iq_bom_dia
+- wait_for_trigger:
+    - trigger: event
+      event_type: iq_bom_dia_done
+  timeout: "00:03:00"
+  continue_on_timeout: true
+```
+
 ## Opções do Bom dia (aba Configuração do add-on)
 
 Todas são opcionais. Toque em **Mostrar opções não usadas** para ver. Depois de mudar, reinicie o add-on.
@@ -130,6 +147,7 @@ Todas são opcionais. Toque em **Mostrar opções não usadas** para ver. Depois
 | `card_seconds` | Segundos que os cartões ficam no painel (10 a 300). | 40 |
 | `prepare_minutes` | Minutos antes do horário para preparar o Bom dia (0 a 180; 0 desliga). | 30 |
 | `prepare_at` | Hora de começar a preparar numa casa sem horário que usa o evento (`HH:MM`). | 06:00 |
+| `greet_names` | Cumprimenta pelo nome de quem está em casa. Com `false`, fala só "Bom dia." e os nomes também saem do cartão Casa e do pedido à plataforma. | `true` |
 
 ## Problemas comuns
 
@@ -180,5 +198,8 @@ it from the repository `https://github.com/IQ-Automate/iq-edge`, then type the 6
 The platform can read the home and apply only approved automations, scripts and scenes; it never calls a service.
 Since 0.2.0 the good morning text is written by the platform's AI (the key stays on the platform; the home sends only the
 summary's data) and falls back to the rule text; it is prepared ahead so it is spoken at once; and an automation can trigger it
-with the event `iq_bom_dia` (optional `event_data: {language: en}`). The good morning options (`weather_entity`, `temp_sensor`,
-`satellite`, voices, waits, `card_seconds`, `prepare_minutes`, `prepare_at`) are in the add-on's configuration.
+with the event `iq_bom_dia` (optional `event_data: {language: en}`). When the speech ends, the add-on fires the event
+`iq_bom_dia_done` (`spoken`: true or false, `language`), so an automation can wait for it, for example to start the background
+music. The good morning options (`weather_entity`, `temp_sensor`, `satellite`, voices, waits, `card_seconds`, `prepare_minutes`,
+`prepare_at`, `greet_names`) are in the add-on's configuration. `greet_names: false` makes it say only "Good morning.", with no
+names (in the speech, on the Home card or in the request to the platform).
