@@ -134,20 +134,23 @@ estimado da fala. Use o evento para começar a música ambiente só depois da fa
 
 Todas são opcionais. Toque em **Mostrar opções não usadas** para ver. Depois de mudar, reinicie o add-on.
 
-| Opção | O que faz | Padrão |
+Deixar uma opção vazia usa o **padrão IQ** (coluna da direita). Escreva um valor só quando uma casa precisar de outro
+comportamento.
+
+| Opção | O que faz | Vazio (padrão IQ) |
 | --- | --- | --- |
 | `weather_entity` | A entidade `weather.*` da previsão. | a primeira da casa |
 | `temp_sensor` | Um `sensor.*` que dá a temperatura agora (por exemplo, o de fora). | o `weather.*` |
 | `satellite` | Um `assist_satellite.*` de reserva: fala quando o alto-falante ou a voz falham, ou quando não há alto-falante. | nenhum |
-| `tts_voice` | O id da voz em português no motor de voz (por exemplo, ElevenLabs). | a voz do motor |
-| `tts_voice_en` | O id da voz em inglês. | `tts_voice` |
+| `tts_voice` | O id da voz em português no motor de voz (por exemplo, ElevenLabs). | com a ElevenLabs, a voz padrão da IQ; com outro motor, a voz do motor |
+| `tts_voice_en` | O id da voz em inglês. | a voz de `tts_voice` (que, vazio, segue a regra da linha acima) |
 | `speaker_delay` | Segundos de espera antes de tocar (0 a 15). A fala automática não espera. | 2 |
 | `speaker_wait` | Segundos que espera um alto-falante indisponível voltar (0 a 30). | 8 |
-| `speaker_busy` | Alto-falante tocando: `voice` fala no aparelho de reserva sem interromper; `interrupt` fala por cima. | `voice` |
+| `speaker_busy` | Alto-falante tocando (TV ou música): `interrupt` fala por cima; `voice` fala no aparelho de reserva, sem interromper. | `interrupt` (fala por cima) |
 | `card_seconds` | Segundos que os cartões ficam no painel (10 a 300). | 40 |
 | `prepare_minutes` | Minutos antes do horário para preparar o Bom dia (0 a 180; 0 desliga). | 30 |
 | `prepare_at` | Hora de começar a preparar numa casa sem horário que usa o evento (`HH:MM`). | 06:00 |
-| `greet_names` | Cumprimenta pelo nome de quem está em casa. Com `false`, fala só "Bom dia." e os nomes também saem do cartão Casa e do pedido à plataforma. | `true` |
+| `greet_names` | Cumprimenta pelo nome de quem está em casa. Com `true`, fala os nomes. Sem nomes (vazio ou `false`), fala só "Bom dia." e os nomes também saem do cartão Casa e do pedido à plataforma. | sem nomes |
 
 ## Problemas comuns
 
@@ -201,5 +204,7 @@ summary's data) and falls back to the rule text; it is prepared ahead so it is s
 with the event `iq_bom_dia` (optional `event_data: {language: en}`). When the speech ends, the add-on fires the event
 `iq_bom_dia_done` (`spoken`: true or false, `language`), so an automation can wait for it, for example to start the background
 music. The good morning options (`weather_entity`, `temp_sensor`, `satellite`, voices, waits, `card_seconds`, `prepare_minutes`,
-`prepare_at`, `greet_names`) are in the add-on's configuration. `greet_names: false` makes it say only "Good morning.", with no
-names (in the speech, on the Home card or in the request to the platform).
+`prepare_at`, `greet_names`) are in the add-on's configuration. Since 0.2.3 an empty option means the IQ default: the speech
+plays over the TV or music (`speaker_busy: interrupt`), says only "Good morning." with no names (in the speech, on the Home card
+or in the request to the platform), and, with ElevenLabs, uses the IQ voice. `speaker_busy: voice`, `greet_names: true` and a
+voice id in `tts_voice` bring back the old behavior.
