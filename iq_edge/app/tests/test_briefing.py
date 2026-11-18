@@ -42,6 +42,12 @@ ATOM = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
 <entry><title>Outro alerta</title></entry></feed>"""
 
 
+# 0.2.3: sem a opcao, o Bom dia NAO fala nomes (padrao IQ). Quase todos os testes deste arquivo cobrem o texto COM nomes, entao
+# o modulo inteiro roda com greet_names ligada ("true", como o Supervisor escreve); os testes do padrao (vazio) e do `false`
+# tiram ou trocam a variavel por conta propria (NomesDesligadosTest, PadraoIqTest).
+_ambiente_do_modulo = mock.patch.dict(os.environ, {"IQ_BRIEFING_GREET_NAMES": "true"})  # iniciado no setUpModule, la embaixo
+
+
 def centro_falso(resposta):
     """Um centro falso: `compose(pedido)` guarda o pedido e devolve `resposta` (ou levanta, se for uma excecao)."""
     pedidos = []
@@ -1029,7 +1035,8 @@ class AberturasIgnoradasTest(unittest.TestCase):
 
 
 class SonosTocandoTest(unittest.TestCase):
-    """Alguem vendo TV pela barra: o resumo nao interrompe, fala pelo Voice."""
+    """Alguem vendo TV pela barra: com `speaker_busy: voice` escrito o resumo nao interrompe, fala pelo Voice (0.2.3: vazio
+    passa a interromper; esse comportamento esta em PadraoIqTest)."""
 
     ENV = {
         "IQ_BRIEFING_SPEAKER": "media_player.living",
@@ -1039,7 +1046,7 @@ class SonosTocandoTest(unittest.TestCase):
         "IQ_BRIEFING_SPEAKER_DELAY": "2",
         "IQ_BRIEFING_SPEAKER_WAIT": "8",
         "IQ_BRIEFING_SPEAKER_VOLUME": "65",
-        "IQ_BRIEFING_SPEAKER_BUSY": "",
+        "IQ_BRIEFING_SPEAKER_BUSY": "voice",
         "IQ_BRIEFING_SATELLITE": "assist_satellite.sala",
     }
 
@@ -1123,12 +1130,17 @@ class SonosTocandoTest(unittest.TestCase):
         self.assertEqual(self.anunciou, [])
 
     def test_modo_interromper_fala_por_cima(self) -> None:
-        with mock.patch.dict(os.environ, {"IQ_BRIEFING_SPEAKER_BUSY": "interromper"}):
-            self._handle("bom dia automatico", [self._sonos("playing")])
-        self.assertEqual(len(self.tocou), 1)
-        self.assertEqual(self.anunciou, [])
-        self.assertEqual(self.volumes, [0.65])
-        self.assertEqual(briefing.speaker_config()["ocupado"], "voice")  # padrao apos o patch
+        for escrito in ("interromper", "interrupt"):  # o valor do schema do add-on e `interrupt`
+            self.tocou.clear()
+            self.anunciou.clear()
+            self.volumes.clear()
+            with self.subTest(escrito), mock.patch.dict(os.environ, {"IQ_BRIEFING_SPEAKER_BUSY": escrito}):
+                self._handle("bom dia automatico", [self._sonos("playing")])
+                self.assertEqual(len(self.tocou), 1)
+                self.assertEqual(self.anunciou, [])
+                self.assertEqual(self.volumes, [0.65])
+                self.assertEqual(briefing.speaker_config()["ocupado"], "interromper")
+        self.assertEqual(briefing.speaker_config()["ocupado"], "voice")  # o valor escrito no ENV da classe
 
 
 class UnidadePeloIdiomaTest(unittest.TestCase):
@@ -1421,10 +1433,11 @@ class CasaDesligadaTest(unittest.TestCase):
 class NomesDesligadosTest(unittest.TestCase):
     """IQ_BRIEFING_GREET_NAMES=false (opcao greet_names do add-on, 0.2.2): nenhum nome de quem esta em casa vira texto -- a fala
     diz so "Bom dia.", o cartao Casa nao tem "Em casa: ..." e o pedido ao centro leva `names` vazio. A coleta nao muda (so o texto).
-    Sem a opcao, tudo como antes."""
+    0.2.3: sem a opcao (vazio) vale o mesmo que `false`; o texto COM nomes vem so de `true` (LIGADA aqui)."""
 
     NOTICIAS = [("Orlando", ["Hurricane watch for Florida"]), ("Brasil", ["Eleições 2026"])]
     DESLIGADA = {"IQ_BRIEFING_GREET_NAMES": "false"}
+    LIGADA = {"IQ_BRIEFING_GREET_NAMES": "true"}
 
     def setUp(self) -> None:
         patcher = mock.patch.dict(os.environ)
@@ -1439,14 +1452,15 @@ class NomesDesligadosTest(unittest.TestCase):
             self.assertNotIn(nome, str(texto))
 
     def test_saudacao_ligada_e_desligada_em_portugues_e_ingles(self) -> None:
-        self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia, Victtor e Matheus.")
-        self.assertEqual(briefing._saudacao(self.dados, "en"), "Good morning, Victtor and Matheus.")
-        self.assertEqual(briefing._saudacao({**self.dados, "pessoas": ["Ana"]}, "pt"), "Bom dia, Ana.")
+        with mock.patch.dict(os.environ, self.LIGADA):
+            self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia, Victtor e Matheus.")
+            self.assertEqual(briefing._saudacao(self.dados, "en"), "Good morning, Victtor and Matheus.")
+            self.assertEqual(briefing._saudacao({**self.dados, "pessoas": ["Ana"]}, "pt"), "Bom dia, Ana.")
+            self.assertEqual(briefing._saudacao({**self.dados, "pessoas": []}, "pt"), "Bom dia.")  # ninguem em casa: igual
         with mock.patch.dict(os.environ, self.DESLIGADA):
             self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia.")
             self.assertEqual(briefing._saudacao(self.dados, "en"), "Good morning.")
             self.assertEqual(briefing._saudacao({**self.dados, "pessoas": ["Ana"]}, "pt"), "Bom dia.")
-        self.assertEqual(briefing._saudacao({**self.dados, "pessoas": []}, "pt"), "Bom dia.")  # ninguem em casa: igual
 
     def test_varias_formas_de_desligar(self) -> None:
         for valor in ("false", "False", "FALSE", " false ", "nao", "não", "NAO", "Não", "no", "NO", "0", "off", " OFF "):
@@ -1454,21 +1468,27 @@ class NomesDesligadosTest(unittest.TestCase):
                 self.assertFalse(briefing._nomes_ligados(), valor)
                 self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia.", valor)
 
-    def test_opcao_ligada_equivale_a_ausente(self) -> None:
-        self.assertTrue(briefing._nomes_ligados())  # ausente
-        for valor in ("true", "True", "TRUE", "sim", "yes", "1", "on", "", "  "):
+    def test_formas_de_ligar_e_vazio_ou_ausente_desligado(self) -> None:
+        self.assertFalse(briefing._nomes_ligados())  # ausente (0.2.3: sem nomes)
+        for valor in ("true", "True", "TRUE", " true ", "sim", "Sim", "yes", "1", "on", "ON"):
             with mock.patch.dict(os.environ, {"IQ_BRIEFING_GREET_NAMES": valor}):
                 self.assertTrue(briefing._nomes_ligados(), repr(valor))
                 self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia, Victtor e Matheus.", repr(valor))
+        for valor in ("", "  ", "talvez"):  # vazio (e qualquer valor que nao seja "ligar") fica sem nomes
+            with mock.patch.dict(os.environ, {"IQ_BRIEFING_GREET_NAMES": valor}):
+                self.assertFalse(briefing._nomes_ligados(), repr(valor))
+                self.assertEqual(briefing._saudacao(self.dados, "pt"), "Bom dia.", repr(valor))
 
     def test_prefixo_do_bom_dia_preparado(self) -> None:
-        self.assertEqual(
-            briefing.prefixo_da_hora(self.dados, "pt"), "Bom dia, Victtor e Matheus. Aberto ou destravado agora: Portão da garagem."
-        )
-        self.assertEqual(
-            briefing.prefixo_da_hora(self.dados, "en"),
-            "Good morning, Victtor and Matheus. Open or unlocked right now: Portão da garagem.",
-        )
+        with mock.patch.dict(os.environ, self.LIGADA):
+            self.assertEqual(
+                briefing.prefixo_da_hora(self.dados, "pt"),
+                "Bom dia, Victtor e Matheus. Aberto ou destravado agora: Portão da garagem.",
+            )
+            self.assertEqual(
+                briefing.prefixo_da_hora(self.dados, "en"),
+                "Good morning, Victtor and Matheus. Open or unlocked right now: Portão da garagem.",
+            )
         with mock.patch.dict(os.environ, self.DESLIGADA):
             self.assertEqual(briefing.prefixo_da_hora(self.dados, "pt"), "Bom dia. Aberto ou destravado agora: Portão da garagem.")
             self.assertEqual(
@@ -1494,7 +1514,8 @@ class NomesDesligadosTest(unittest.TestCase):
         self._sem_nomes(preparo)
 
     def test_cartao_casa_sem_a_linha_dos_nomes(self) -> None:
-        ligado = briefing.build_cards(self.dados, PREVISAO, self.NOTICIAS, "pt")[1]
+        with mock.patch.dict(os.environ, self.LIGADA):
+            ligado = briefing.build_cards(self.dados, PREVISAO, self.NOTICIAS, "pt")[1]
         self.assertIn("Em casa: Victtor, Matheus", ligado["linhas"])
         with mock.patch.dict(os.environ, self.DESLIGADA):
             for idioma, titulo, linha in (("pt", "Casa", "Em casa"), ("en", "Home", "At home")):
@@ -1508,8 +1529,9 @@ class NomesDesligadosTest(unittest.TestCase):
 
     def test_pedido_ao_centro_com_names_vazio(self) -> None:
         cliente, pedidos = centro_falso({"text": "Bom dia.", "picks": []})
-        briefing.compose_spoken(self.dados, PREVISAO, [("Orlando", ["Furacao"])], "pt", client=cliente)
-        self.assertEqual(pedidos[0]["facts"]["names"], ["Victtor", "Matheus"])  # ausente = ligado
+        with mock.patch.dict(os.environ, self.LIGADA):
+            briefing.compose_spoken(self.dados, PREVISAO, [("Orlando", ["Furacao"])], "pt", client=cliente)
+        self.assertEqual(pedidos[0]["facts"]["names"], ["Victtor", "Matheus"])  # `true` escrito
         with mock.patch.dict(os.environ, self.DESLIGADA):
             briefing.compose_spoken(self.dados, PREVISAO, [("Orlando", ["Furacao"])], "pt", client=cliente)
         pedido = pedidos[1]
@@ -1525,7 +1547,7 @@ class NomesDesligadosTest(unittest.TestCase):
         with mock.patch.dict(os.environ, self.DESLIGADA):
             self.assertEqual(briefing.collect_house(ESTADOS)["pessoas"], ["Victtor", "Matheus"])
 
-    def test_sem_a_opcao_nada_muda(self) -> None:
+    def test_vazio_e_false_dao_o_mesmo_e_true_traz_os_nomes(self) -> None:
         def tudo():
             return (
                 briefing.build_spoken_fallback(self.dados, PREVISAO, self.NOTICIAS, "pt"),
@@ -1535,14 +1557,23 @@ class NomesDesligadosTest(unittest.TestCase):
                 briefing.pedido_ia(self.dados, PREVISAO, self.NOTICIAS, "pt", {"Orlando": 1, "Brasil": 1}),
             )
 
-        ausente = tudo()
-        self.assertTrue(ausente[0].startswith("Bom dia, Victtor e Matheus."))
-        self.assertTrue(ausente[1].startswith("Good morning, Victtor and Matheus."))
-        self.assertIn("Em casa: Victtor, Matheus", ausente[2][1]["linhas"])
-        self.assertTrue(ausente[3].startswith("Bom dia, Victtor e Matheus."))
-        self.assertEqual(ausente[4]["facts"]["names"], ["Victtor", "Matheus"])
-        with mock.patch.dict(os.environ, {"IQ_BRIEFING_GREET_NAMES": "true"}):  # explicitamente ligada = ausente
-            self.assertEqual(tudo(), ausente)
+        ausente = tudo()  # 0.2.3: ausente = sem nomes
+        self.assertTrue(ausente[0].startswith("Bom dia. "))
+        self.assertTrue(ausente[1].startswith("Good morning. "))
+        self.assertFalse([x for x in ausente[2][1]["linhas"] if x.startswith("Em casa")])
+        self.assertTrue(ausente[3].startswith("Bom dia. "))
+        self.assertEqual(ausente[4]["facts"]["names"], [])
+        self._sem_nomes(ausente)
+        for env in ({"IQ_BRIEFING_GREET_NAMES": ""}, self.DESLIGADA):  # vazio e `false` escrito = ausente
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(tudo(), ausente, env)
+        with mock.patch.dict(os.environ, self.LIGADA):  # `true` escrito: os nomes de quem esta em casa, como era o padrao antes
+            ligada = tudo()
+        self.assertTrue(ligada[0].startswith("Bom dia, Victtor e Matheus."))
+        self.assertTrue(ligada[1].startswith("Good morning, Victtor and Matheus."))
+        self.assertIn("Em casa: Victtor, Matheus", ligada[2][1]["linhas"])
+        self.assertTrue(ligada[3].startswith("Bom dia, Victtor e Matheus."))
+        self.assertEqual(ligada[4]["facts"]["names"], ["Victtor", "Matheus"])
 
     def test_do_pedido_de_voz_ate_a_fala_e_aos_cartoes(self) -> None:
         publicados = []
@@ -1755,7 +1786,8 @@ class FimDoBomDiaTest(unittest.TestCase):
         casos = (
             ("sem alto-falante nem satelite", self.SEM_ALTO_FALANTE, None, {}),
             ("alto-falante fora do ar e sem satelite", self.SEM_SATELITE, ESTADOS + self.VOZ_FORA, {}),
-            ("alto-falante ocupado (modo voice) e sem satelite", self.SEM_SATELITE, ESTADOS + self.VOZ_TOCANDO, {}),
+            ("alto-falante ocupado (modo voice) e sem satelite", {**self.SEM_SATELITE, "IQ_BRIEFING_SPEAKER_BUSY": "voice"},
+             ESTADOS + self.VOZ_TOCANDO, {}),
             ("a voz falhou e sem satelite", self.SEM_SATELITE, None, {"toca": False}),
             ("a voz falhou e a reserva tambem", {}, None, {"toca": False, "anuncia": False}),
         )
@@ -1903,9 +1935,11 @@ _PASTA_SEM_PREFS = tempfile.TemporaryDirectory()
 def setUpModule() -> None:
     # Os testes acima leem o .env (mock.patch.dict): nenhum arquivo de preferencias de verdade (ex.: o do Orange Pi) pode valer neles.
     os.environ["IQ_BRIEFING_PREFS_FILE"] = os.path.join(_PASTA_SEM_PREFS.name, "nao-existe.json")
+    _ambiente_do_modulo.start()  # 0.2.3: greet_names ligada em todo o arquivo (ver o comentario no topo)
 
 
 def tearDownModule() -> None:
+    _ambiente_do_modulo.stop()
     os.environ.pop("IQ_BRIEFING_PREFS_FILE", None)
 
 
@@ -2267,3 +2301,261 @@ class MotorDeVozPeloHaTest(unittest.TestCase):
         with self._ha():
             cfg = briefing.speaker_config()  # o alto-falante vem das preferencias do centro
         self.assertEqual((cfg["speaker"], cfg["engine"]), ("media_player.living", "tts.elevenlabs_text_to_speech"))
+
+
+# --------------------------------------------------------------------------
+# 0.2.3: padrao IQ (campos vazios valem o comportamento da empresa)
+# --------------------------------------------------------------------------
+
+
+class PadraoIqTest(unittest.TestCase):
+    """0.2.3: `speaker_busy` vazio interrompe (`voice` escrito nao); `greet_names` vazio fala sem nomes (`true` com nomes, `false`
+    sem); `tts_voice` vazio com a ElevenLabs usa a voz padrao da empresa, em pt e em en (voz escrita sempre vence; outro motor nao
+    manda voz); se a fala com a voz PADRAO falha, uma segunda tentativa vai sem voz (uma voz escrita que falha nao e trocada)."""
+
+    PADRAO = "nPczCjzI2devNBz1zQrb"
+    ELEVENLABS = "tts.elevenlabs_text_to_speech"
+    ENV = {
+        "IQ_BRIEFING_SPEAKER": "media_player.living",
+        "IQ_BRIEFING_TTS_ENGINE": ELEVENLABS,
+        "IQ_BRIEFING_TTS_VOICE": "",
+        "IQ_BRIEFING_TTS_VOICE_EN": "",
+        "IQ_BRIEFING_SPEAKER_BUSY": "",
+        "IQ_BRIEFING_SPEAKER_DELAY": "2",
+        "IQ_BRIEFING_SPEAKER_VOLUME": "",
+        "IQ_BRIEFING_SATELLITE": "assist_satellite.sala",
+    }
+
+    def setUp(self) -> None:
+        for patcher in (
+            mock.patch("iq_edge.briefing._ai_client", return_value=None),
+            mock.patch.dict(os.environ, self.ENV),
+            mock.patch.multiple(briefing, HA_URL="http://ha.teste/core", HA_TOKEN="token-falso"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        os.environ.pop("IQ_BRIEFING_GREET_NAMES", None)  # vazio: a opcao do add-on nao escreveu nada
+        self.tocou, self.anunciou, self.cfgs, self.corpos = [], [], [], []
+
+    # ---- alto-falante ocupado ----
+
+    def _handle(self, estado="playing", texto="bom dia automatico", **mais):
+        estados = ESTADOS + [
+            {"entity_id": "media_player.living", "state": estado, "attributes": {"volume_level": 0.3}},
+            {"entity_id": self.ELEVENLABS, "state": "unknown", "attributes": {}},
+        ]
+
+        def fala(texto_falado, idioma, cfg):
+            self.tocou.append(texto_falado)
+            self.cfgs.append(cfg)
+            return True
+
+        return briefing.handle(
+            texto,
+            fetch_states_fn=lambda: estados,
+            fetch_forecast_fn=lambda e: PREVISAO,
+            fetch_feed_fn=lambda url, n: ["Manchete"],
+            publish_fn=lambda c, d: True,
+            client=None,
+            feeds=[("Orlando", "https://o")],
+            speak_fn=fala,
+            announce_fn=lambda texto_falado, sat: self.anunciou.append((texto_falado, sat)) or True,
+            spawn_fn=lambda f: f(),
+            sleep_fn=lambda s: None,
+            get_volume_fn=lambda e: 0.3,
+            set_volume_fn=lambda e, n: True,
+            wait_fn=lambda e, m: None,
+            **mais,
+        )
+
+    def test_busy_vazio_interrompe_e_fala_por_cima(self) -> None:
+        self.assertEqual(briefing.speaker_config()["ocupado"], "interromper")
+        self.assertEqual(self._handle("playing"), "Um instante.")
+        self.assertEqual(len(self.tocou), 1)  # falou no alto-falante, mesmo tocando a TV
+        self.assertEqual(self.anunciou, [])
+        self.assertEqual(self.cfgs[0]["voz_pt"], self.PADRAO)  # e a voz padrao chega a fala
+
+    def test_busy_interrupt_escrito_continua_interrompendo(self) -> None:
+        for valor in ("interrupt", "interromper", "Interrupt"):
+            self.tocou.clear()
+            self.anunciou.clear()
+            with self.subTest(valor), mock.patch.dict(os.environ, {"IQ_BRIEFING_SPEAKER_BUSY": valor}):
+                self.assertEqual(briefing.speaker_config()["ocupado"], "interromper")
+                self._handle("playing")
+                self.assertEqual((len(self.tocou), self.anunciou), (1, []))
+
+    def test_busy_voice_escrito_nao_interrompe(self) -> None:
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_SPEAKER_BUSY": "voice"}):
+            self.assertEqual(briefing.speaker_config()["ocupado"], "voice")
+            self.assertEqual(self._handle("playing"), "Um instante.")
+            self.assertEqual(self.tocou, [])  # nao falou por cima
+            self.assertEqual([a[1] for a in self.anunciou], ["assist_satellite.sala"])  # falou no aparelho de reserva
+            self.tocou.clear()
+            self.anunciou.clear()
+            self._handle("idle")  # sem nada tocando, `voice` fala no alto-falante como sempre
+            self.assertEqual((len(self.tocou), self.anunciou), (1, []))
+
+    # ---- nomes ----
+
+    def _fala_de_voz(self, **env) -> str:
+        """O texto devolvido ao aparelho de voz (sem alto-falante): `bom dia`, com a variavel greet_names como o teste pedir."""
+        sem_alto_falante = {"IQ_BRIEFING_SPEAKER": "", "IQ_BRIEFING_TTS_ENGINE": "", "IQ_BRIEFING_SATELLITE": ""}
+        with mock.patch.dict(os.environ, {**sem_alto_falante, **env}):
+            return self._handle("playing", "bom dia")
+
+    def test_nomes_vazio_fala_so_bom_dia(self) -> None:
+        self.assertFalse(briefing._nomes_ligados())
+        fala = self._fala_de_voz()
+        self.assertTrue(fala.startswith("Bom dia. "), fala)
+        self.assertNotIn("Victtor", fala)
+        self.assertNotIn("Matheus", fala)
+        self.assertTrue(self._fala_de_voz(IQ_BRIEFING_GREET_NAMES="").startswith("Bom dia. "))
+
+    def test_nomes_true_fala_os_nomes_de_quem_esta_em_casa(self) -> None:
+        fala = self._fala_de_voz(IQ_BRIEFING_GREET_NAMES="true")
+        self.assertTrue(fala.startswith("Bom dia, Victtor e Matheus."), fala)
+        self.assertTrue(self._fala_de_voz(IQ_BRIEFING_GREET_NAMES="True").startswith("Bom dia, Victtor e Matheus."))
+
+    def test_nomes_false_continua_sem_nomes(self) -> None:
+        fala = self._fala_de_voz(IQ_BRIEFING_GREET_NAMES="false")
+        self.assertTrue(fala.startswith("Bom dia. "), fala)
+        self.assertNotIn("Victtor", fala)
+        self.assertNotIn("Matheus", fala)
+
+    # ---- voz padrao ----
+
+    def test_a_constante_da_voz_padrao(self) -> None:
+        self.assertEqual(briefing.VOZ_PADRAO_ELEVENLABS, self.PADRAO)
+
+    def test_elevenlabs_com_voz_vazia_usa_a_voz_padrao_em_pt_e_em_en(self) -> None:
+        for motor in (self.ELEVENLABS, "tts.elevenlabs", "elevenlabs", "TTS.ElevenLabs_Text_To_Speech"):
+            with self.subTest(motor), mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_ENGINE": motor}):
+                cfg = briefing.speaker_config()
+                self.assertEqual((cfg["voz_pt"], cfg["voz_en"]), (self.PADRAO, self.PADRAO))
+                self.assertEqual((cfg["voz_pt_padrao"], cfg["voz_en_padrao"]), (True, True))
+        # a voz vazia tambem vale quando a variavel nem existe
+        with mock.patch.dict(os.environ):
+            os.environ.pop("IQ_BRIEFING_TTS_VOICE")
+            os.environ.pop("IQ_BRIEFING_TTS_VOICE_EN")
+            self.assertEqual(briefing.speaker_config()["voz_pt"], self.PADRAO)
+
+    def test_a_voz_padrao_vai_no_corpo_do_tts_speak_em_pt_e_em_en(self) -> None:
+        cfg = briefing.speaker_config()
+        with self._post():
+            self.assertTrue(briefing.speak_on_speaker("Bom dia.", "pt", cfg))
+            self.assertTrue(briefing.speak_on_speaker("Good morning.", "en", cfg))
+        self.assertEqual([c["options"] for c in self.corpos], [{"voice": self.PADRAO}, {"voice": self.PADRAO}])
+        self.assertEqual([c["language"] for c in self.corpos], ["pt", "en"])
+        self.assertTrue(all(c["entity_id"] == self.ELEVENLABS for c in self.corpos))
+
+    def test_elevenlabs_com_voz_escrita_usa_a_escrita(self) -> None:
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_VOICE": "voz-escrita"}):
+            cfg = briefing.speaker_config()
+            self.assertEqual((cfg["voz_pt"], cfg["voz_en"]), ("voz-escrita", "voz-escrita"))  # en vazia cai na voz em portugues
+            self.assertEqual((cfg["voz_pt_padrao"], cfg["voz_en_padrao"]), (False, False))
+            with mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_VOICE_EN": "voz-en"}):
+                cfg = briefing.speaker_config()
+                self.assertEqual((cfg["voz_pt"], cfg["voz_en"]), ("voz-escrita", "voz-en"))
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_VOICE_EN": "voz-en"}):  # so a voz em ingles escrita: pt usa a padrao
+            cfg = briefing.speaker_config()
+            self.assertEqual((cfg["voz_pt"], cfg["voz_en"]), (self.PADRAO, "voz-en"))
+            self.assertEqual((cfg["voz_pt_padrao"], cfg["voz_en_padrao"]), (True, False))
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_VOICE": "voz-escrita"}), self._post():
+            briefing.speak_on_speaker("Bom dia.", "pt", briefing.speaker_config())
+            briefing.speak_on_speaker("Good morning.", "en", briefing.speaker_config())
+        self.assertEqual([c["options"] for c in self.corpos], [{"voice": "voz-escrita"}, {"voice": "voz-escrita"}])
+
+    def test_outro_motor_com_voz_vazia_nao_manda_voz(self) -> None:
+        for motor in ("tts.google_translate_en_com", "tts.google_pt", "tts.cloud"):
+            self.corpos.clear()
+            with self.subTest(motor), mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_ENGINE": motor}):
+                cfg = briefing.speaker_config()
+                self.assertEqual((cfg["voz_pt"], cfg["voz_en"]), ("", ""))
+                self.assertEqual((cfg["voz_pt_padrao"], cfg["voz_en_padrao"]), (False, False))
+                with self._post():
+                    self.assertTrue(briefing.speak_on_speaker("Bom dia.", "pt", cfg))
+                    self.assertTrue(briefing.speak_on_speaker("Good morning.", "en", cfg))
+                self.assertEqual(len(self.corpos), 2)
+                self.assertTrue(all("options" not in c for c in self.corpos))
+
+    # ---- a voz padrao nunca deixa a casa pior ----
+
+    def _post(self, falha=None):
+        """requests.post falso: guarda cada corpo; `falha(corpo)` devolve a excecao a levantar (ou None)."""
+
+        def post(url, **kwargs):
+            corpo = kwargs["json"]
+            self.corpos.append(corpo)
+            erro = falha(corpo) if falha else None
+            if erro is not None:
+                raise erro
+            return SimpleNamespace(raise_for_status=lambda: None)
+
+        return mock.patch.object(briefing.requests, "post", post)
+
+    def test_voz_padrao_que_falha_tenta_uma_vez_sem_voz(self) -> None:
+        import requests
+
+        cfg = briefing.speaker_config()
+        for idioma, fala in (("pt", "Bom dia."), ("en", "Good morning.")):
+            self.corpos.clear()
+            erro = requests.HTTPError("400: voz inexistente")
+            with self.subTest(idioma), self._post(lambda corpo: erro if "options" in corpo else None):
+                with self.assertLogs("iq_edge.briefing", level="INFO"):
+                    self.assertTrue(briefing.speak_on_speaker(fala, idioma, cfg))
+                self.assertEqual(len(self.corpos), 2)
+                self.assertEqual(self.corpos[0]["options"], {"voice": self.PADRAO})
+                self.assertNotIn("options", self.corpos[1])  # a segunda vai sem a opcao de voz
+                self.assertEqual(
+                    {k: v for k, v in self.corpos[1].items()},
+                    {"entity_id": self.ELEVENLABS, "media_player_entity_id": "media_player.living", "message": fala, "language": idioma},
+                )
+
+    def test_voz_padrao_que_falha_duas_vezes_devolve_false_com_duas_tentativas_so(self) -> None:
+        import requests
+
+        cfg = briefing.speaker_config()
+        with self._post(lambda corpo: requests.ConnectionError("HA fora")), self.assertLogs("iq_edge.briefing", level="WARNING"):
+            self.assertFalse(briefing.speak_on_speaker("Bom dia.", "pt", cfg))
+        self.assertEqual(len(self.corpos), 2)  # uma tentativa extra, nunca mais que isso
+
+    def test_voz_escrita_que_falha_nao_e_trocada(self) -> None:
+        import requests
+
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_VOICE": "voz-escrita", "IQ_BRIEFING_TTS_VOICE_EN": "voz-en"}):
+            cfg = briefing.speaker_config()
+        for idioma in ("pt", "en"):
+            self.corpos.clear()
+            with self.subTest(idioma), self._post(lambda corpo: requests.HTTPError("400")), \
+                    self.assertLogs("iq_edge.briefing", level="WARNING"):
+                self.assertFalse(briefing.speak_on_speaker("Bom dia.", idioma, cfg))
+            self.assertEqual(len(self.corpos), 1)  # sem segunda tentativa: a pessoa escolheu essa voz
+            self.assertIn("options", self.corpos[0])
+
+    def test_so_a_voz_do_idioma_que_veio_do_padrao_tem_segunda_tentativa(self) -> None:
+        import requests
+
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_VOICE_EN": "voz-en"}):  # pt: padrao; en: escrita
+            cfg = briefing.speaker_config()
+        with self._post(lambda corpo: requests.HTTPError("400")), self.assertLogs("iq_edge.briefing", level="WARNING"):
+            briefing.speak_on_speaker("Bom dia.", "pt", cfg)
+            self.assertEqual(len(self.corpos), 2)  # voz padrao: tenta de novo sem voz
+            briefing.speak_on_speaker("Good morning.", "en", cfg)
+            self.assertEqual(len(self.corpos), 3)  # voz escrita: uma tentativa so
+
+    def test_tempo_esgotado_com_a_voz_padrao_nao_repete_a_fala(self) -> None:
+        import requests
+
+        cfg = briefing.speaker_config()
+        with self._post(lambda corpo: requests.ReadTimeout("sem resposta")), self.assertLogs("iq_edge.briefing", level="WARNING"):
+            self.assertFalse(briefing.speak_on_speaker("Bom dia.", "pt", cfg))
+        self.assertEqual(len(self.corpos), 1)  # a fala pode ter tocado: falar de novo repetiria o Bom dia
+
+    def test_sem_voz_nenhuma_falha_uma_vez_so(self) -> None:
+        import requests
+
+        with mock.patch.dict(os.environ, {"IQ_BRIEFING_TTS_ENGINE": "tts.google_pt"}):
+            cfg = briefing.speaker_config()
+        with self._post(lambda corpo: requests.HTTPError("500")), self.assertLogs("iq_edge.briefing", level="WARNING"):
+            self.assertFalse(briefing.speak_on_speaker("Bom dia.", "pt", cfg))
+        self.assertEqual(len(self.corpos), 1)
