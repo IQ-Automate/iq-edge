@@ -16,7 +16,7 @@ configuration:
     description: An assist_satellite.* that speaks the good morning when the speaker or its voice fails, or when there is no speaker.
   tts_voice:
     name: Good morning — voice (Portuguese)
-    description: The voice id of the voice engine (for example, ElevenLabs). Also used in English when the English one is empty.
+    description: The voice id of the voice engine (for example, ElevenLabs). Also used in English when the English one is empty. Empty, with ElevenLabs the IQ default voice is used.
   tts_voice_en:
     name: Good morning — voice (English)
     description: The voice id for English.
@@ -28,7 +28,7 @@ configuration:
     description: Seconds to wait for an unavailable speaker to come back (default 8).
   speaker_busy:
     name: Good morning — speaker playing
-    description: "voice: speak on the reserve voice device without interrupting (default). interrupt: speak over the TV or music."
+    description: "interrupt: speak over the TV or music (default). voice: speak on the reserve voice device without interrupting."
   card_seconds:
     name: Good morning — cards on the panel (s)
     description: How long the cards stay on the panel (default 40).
@@ -40,4 +40,4 @@ configuration:
     description: For a home without a chosen time that uses the iq_bom_dia event, the time to start preparing (default 06:00).
   greet_names:
     name: Good morning — greet by name
-    description: Greets the people at home by name (default on). Off, it says only "Good morning." and uses no names.
+    description: On, greets the people at home by name. Empty or off (default), it says only "Good morning." and uses no names.

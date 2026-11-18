@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.3
+
+- Padrão IQ: o que ficava vazio na aba Configuração agora vale o comportamento da empresa, sem preencher nada em cada casa.
+  Os campos continuam existindo para trocar numa casa.
+- **O que muda ao atualizar, para quem deixou os campos vazios:**
+  - `speaker_busy` vazio: com o alto-falante tocando (TV ou música), o Bom dia **fala por cima**. Antes falava no aparelho de
+    voz de reserva, sem interromper.
+  - `greet_names` vazio: o Bom dia **não fala nomes** (só "Bom dia."; também sem a linha "Em casa" no cartão Casa). Antes
+    falava os nomes de quem estava em casa.
+  - `tts_voice` vazio **com a ElevenLabs**: usa a **voz padrão da IQ**, em português e em inglês. Antes usava a voz do motor.
+    Com outro motor de voz, nada muda. Se a fala com a voz padrão falhar, o add-on tenta uma vez sem escolher a voz.
+- **Para voltar ao que era:** `speaker_busy: voice`, `greet_names: true` e, em `tts_voice`, o id de outra voz (a voz que a
+  casa usava). Um valor escrito sempre vale mais que o padrão.
+
 ## 0.2.2
 
 - Opção nova `greet_names`: com `false`, o Bom dia fala só "Bom dia." e não usa o nome de ninguém (nem na fala, nem no cartão

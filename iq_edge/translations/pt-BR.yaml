@@ -16,7 +16,7 @@ configuration:
     description: Um assist_satellite.* que fala o Bom dia quando o alto-falante ou a voz falham, ou quando não há alto-falante.
   tts_voice:
     name: Bom dia — voz (português)
-    description: O id da voz no motor de voz (por exemplo, ElevenLabs). Vale também em inglês se a voz em inglês ficar vazia.
+    description: O id da voz no motor de voz (por exemplo, ElevenLabs). Vale também em inglês se a voz em inglês ficar vazia. Vazio, com a ElevenLabs vale a voz padrão da IQ.
   tts_voice_en:
     name: Bom dia — voz (inglês)
     description: O id da voz em inglês.
@@ -28,7 +28,7 @@ configuration:
     description: Segundos que espera o alto-falante voltar se estiver indisponível (padrão 8).
   speaker_busy:
     name: Bom dia — alto-falante tocando
-    description: "voice: fala no aparelho de voz de reserva sem interromper (padrão). interrupt: fala por cima da TV ou da música."
+    description: "interrupt: fala por cima da TV ou da música (padrão). voice: fala no aparelho de voz de reserva sem interromper."
   card_seconds:
     name: Bom dia — cartões no painel (s)
     description: Quanto tempo os cartões ficam no painel (padrão 40).
@@ -40,4 +40,4 @@ configuration:
     description: Numa casa sem horário escolhido que usa o evento iq_bom_dia, a hora de começar a preparar (padrão 06:00).
   greet_names:
     name: Bom dia — cumprimentar pelo nome
-    description: Cumprimenta pelo nome de quem está em casa (padrão ligado). Desligado, fala só "Bom dia." e não usa nomes.
+    description: Ligado, cumprimenta pelo nome de quem está em casa. Vazio ou desligado (padrão), fala só "Bom dia." e não usa nomes.

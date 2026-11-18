@@ -29,7 +29,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(config['options'], {'center_url': 'https://business.iqautom8.com', 'pairing_code': ''})
         # lote A5: the Bom dia's options are all optional (out of `options`, so they stay unset until someone fills them in)
         self.assertEqual(set(config['schema']), {'center_url', 'pairing_code'} | set(settings.BRIEFING_OPTIONS))
-        self.assertEqual(config['schema']['greet_names'], 'bool?')  # 0.2.2: a switch; unset = on (the code's default)
+        self.assertEqual(config['schema']['greet_names'], 'bool?')  # 0.2.2: a switch; 0.2.3: unset = off (no names)
         for key, kind in config['schema'].items():
             if key != 'center_url':
                 self.assertTrue(kind.endswith('?'), key)
@@ -91,12 +91,13 @@ class BriefingOptionsTests(EdgeCase):
         self.assertEqual((briefing.satellite(), schedule.prepare_minutes()), ('assist_satellite.cozinha', 45))
 
     def test_greet_names_true_false_or_unset(self):
-        """0.2.2: `greet_names` is a boolean: the Supervisor writes JSON true/false; unset (or no options file) means on, as before."""
+        """0.2.2: `greet_names` is a boolean: the Supervisor writes JSON true/false. 0.2.3: unset (or no options file) means off: no
+        names (the company's default); `true` brings the names back."""
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
         from iq_edge import briefing
-        for options, variable, on in (({'greet_names': False}, 'False', False), ({'greet_names': True}, 'True', True), ({}, None, True)):
+        for options, variable, on in (({'greet_names': False}, 'False', False), ({'greet_names': True}, 'True', True), ({}, None, False)):
             os.environ.pop('IQ_BRIEFING_GREET_NAMES', None)
             settings.write_json(settings.data_dir() / 'options.json', dict(options, center_url='https://business.iqautom8.com'), private=False)
             applied = settings.apply_briefing_options()
@@ -106,7 +107,7 @@ class BriefingOptionsTests(EdgeCase):
         os.environ.pop('IQ_BRIEFING_GREET_NAMES', None)
         (settings.data_dir() / 'options.json').unlink()  # no options file at all
         self.assertEqual(settings.apply_briefing_options(), [])
-        self.assertTrue(briefing._nomes_ligados())
+        self.assertFalse(briefing._nomes_ligados())
 
 
 if __name__ == '__main__':

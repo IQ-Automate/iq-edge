@@ -45,11 +45,12 @@ Configuracao (variaveis lidas na hora, todas opcionais):
   IQ_BRIEFING_MAX_WORDS       tamanho maximo da fala (padrao 110)
   IQ_BRIEFING_CASA            sim (padrao) ou nao/off/0: com "nao", o resumo NAO fala nem
                               mostra o estado da casa (aberto/fechado, alarme); fica so
-                              cumprimento (com os nomes), clima e noticias
+                              cumprimento (com os nomes, se ligados), clima e noticias
   IQ_BRIEFING_CLIMA           sim (padrao) ou nao: com "nao", sem clima (fala e cartao)
-  IQ_BRIEFING_GREET_NAMES     sim (padrao) ou nao/no/off/0/false: com "nao", nenhum nome de quem
-                              esta em casa vira texto: a fala diz so "Bom dia.", o cartao Casa
-                              nao tem "Em casa: ..." e o pedido ao centro leva `names` vazio
+  IQ_BRIEFING_GREET_NAMES     nao (padrao desde a 0.2.3) ou sim/yes/on/1/true: sem isto (ou com "nao"),
+                              nenhum nome de quem esta em casa vira texto: a fala diz so "Bom dia.",
+                              o cartao Casa nao tem "Em casa: ..." e o pedido ao centro leva `names`
+                              vazio; com "sim", a fala traz os nomes de quem esta em casa
                               (opcao greet_names do add-on; o centro nao tem preferencia disto)
   IQ_BRIEFING_TOTAL           total de noticias somando as fontes, ex.: "6-7" (sem padrao)
   IQ_BRIEFING_PREFS_FILE      arquivo das preferencias vindas do centro (lote H2; padrao
@@ -70,14 +71,15 @@ Voz premium num alto-falante (opcional; todas juntas ou nenhuma):
 
   IQ_BRIEFING_SPEAKER         media_player que conta o resumo (ex.: o Sonos da sala)
   IQ_BRIEFING_TTS_ENGINE      entidade tts que gera a voz (ex.: ElevenLabs)
-  IQ_BRIEFING_TTS_VOICE       id da voz em portugues (e em ingles, se a outra faltar)
+  IQ_BRIEFING_TTS_VOICE       id da voz em portugues (e em ingles, se a outra faltar); vazio, com a
+                              ElevenLabs vale a voz padrao da empresa (VOZ_PADRAO_ELEVENLABS, 0.2.3)
   IQ_BRIEFING_TTS_VOICE_EN    id da voz em ingles (opcional)
   IQ_BRIEFING_SPEAKER_VOLUME  volume do resumo (0.65 ou 65); depois volta ao anterior
   IQ_BRIEFING_IGNORAR         entidades (ou nomes) que NAO contam como "aberto"
                               (ex.: a porta do quarto que dispara o bom dia)
   IQ_BRIEFING_SPEAKER_BUSY    o que fazer se o alto-falante estiver TOCANDO (TV, musica):
-                              "voice" (padrao: fala pelo aparelho de voz, sem interromper)
-                              ou "interromper" (fala por cima, com o volume do resumo)
+                              "interromper" (padrao desde a 0.2.3: fala por cima, com o volume do
+                              resumo) ou "voice" (fala pelo aparelho de voz, sem interromper)
   IQ_BRIEFING_SPEAKER_WAIT    segundos que espera o alto-falante voltar se estiver
                               indisponivel na hora (padrao 8; o Sonos oscila)
   IQ_BRIEFING_SPEAKER_DELAY   segundos de espera antes de tocar (padrao 2): o
@@ -923,9 +925,10 @@ def _casa_ligada() -> bool:
 
 
 def _nomes_ligados() -> bool:
-    """IQ_BRIEFING_GREET_NAMES (opcao greet_names do add-on; o Supervisor manda true/false): False (nao/não/no/0/false/off)
-    tira o nome de quem esta em casa de tudo o que vira texto (fala, cartao Casa, pedido ao centro). A coleta nao muda."""
-    return os.getenv("IQ_BRIEFING_GREET_NAMES", "").strip().lower() not in ("nao", "não", "no", "0", "false", "off")
+    """IQ_BRIEFING_GREET_NAMES (opcao greet_names do add-on; o Supervisor manda true/false): so com sim/yes/on/1/true o nome de
+    quem esta em casa entra no que vira texto (fala, cartao Casa, pedido ao centro). Vazio ou qualquer outro valor (inclusive
+    false) fica sem nomes (padrao da empresa desde a 0.2.3). A coleta nao muda."""
+    return os.getenv("IQ_BRIEFING_GREET_NAMES", "").strip().lower() in ("sim", "yes", "on", "1", "true")
 
 
 def _lista_nomes(nomes: list[str], idioma: str) -> str:
@@ -1297,13 +1300,23 @@ def compose_spoken(
 # --------------------------------------------------------------------------
 
 
+# Voz padrao da empresa na ElevenLabs; o campo `tts_voice` (IQ_BRIEFING_TTS_VOICE) troca.
+VOZ_PADRAO_ELEVENLABS = "nPczCjzI2devNBz1zQrb"
+
+
 def speaker_config() -> dict[str, Any] | None:
-    """Configuracao da voz premium; None se nao estiver configurada."""
+    """Configuracao da voz premium; None se nao estiver configurada. Voz vazia + motor ElevenLabs = a voz padrao da empresa
+    (`voz_pt_padrao`/`voz_en_padrao` dizem quando foi ela, para speak_on_speaker tentar de novo sem voz se ela falhar);
+    com outro motor, voz vazia continua sem voz."""
     alto_falante = (_pref("speaker") or os.getenv("IQ_BRIEFING_SPEAKER", "")).strip()
     motor = _motor_tts(os.getenv("IQ_BRIEFING_TTS_ENGINE", "").strip())
     if not alto_falante or not motor:
         return None
-    voz_pt = os.getenv("IQ_BRIEFING_TTS_VOICE", "").strip()
+    escrita_pt = os.getenv("IQ_BRIEFING_TTS_VOICE", "").strip()
+    escrita_en = os.getenv("IQ_BRIEFING_TTS_VOICE_EN", "").strip()
+    padrao = VOZ_PADRAO_ELEVENLABS if "elevenlabs" in motor.lower() else ""
+    voz_pt = escrita_pt or padrao
+    voz_en = escrita_en or voz_pt
     try:
         atraso = max(0.0, min(15.0, float(os.getenv("IQ_BRIEFING_SPEAKER_DELAY", "2") or 2)))
     except ValueError:
@@ -1328,9 +1341,11 @@ def speaker_config() -> dict[str, Any] | None:
         "engine": motor,
         "volume": volume,
         "espera": espera,
-        "ocupado": "interromper" if os.getenv("IQ_BRIEFING_SPEAKER_BUSY", "").strip().lower().startswith("interr") else "voice",
+        "ocupado": "voice" if os.getenv("IQ_BRIEFING_SPEAKER_BUSY", "").strip().lower().startswith("voice") else "interromper",
         "voz_pt": voz_pt,
-        "voz_en": os.getenv("IQ_BRIEFING_TTS_VOICE_EN", "").strip() or voz_pt,
+        "voz_en": voz_en,
+        "voz_pt_padrao": bool(padrao) and not escrita_pt,
+        "voz_en_padrao": bool(padrao) and not (escrita_en or escrita_pt),
         "atraso": atraso,
         "satellite": os.getenv("IQ_BRIEFING_SATELLITE", "").strip(),
     }
@@ -1381,7 +1396,8 @@ def _esperar_alto_falante(
 
 
 def speak_on_speaker(fala: str, idioma: str, cfg: dict[str, Any]) -> bool:
-    """tts.speak do HA: gera a voz e toca no alto-falante."""
+    """tts.speak do HA: gera a voz e toca no alto-falante. Se a voz era a PADRAO da empresa (nao a escrita pela pessoa) e o
+    HA recusou ou a rede falhou, tenta uma vez sem a opcao de voz; tempo esgotado nao repete (a fala pode ter tocado)."""
     if not HA_URL or not HA_TOKEN:
         return False
     corpo: dict[str, Any] = {
@@ -1393,21 +1409,26 @@ def speak_on_speaker(fala: str, idioma: str, cfg: dict[str, Any]) -> bool:
     voz = cfg["voz_en"] if idioma == "en" else cfg["voz_pt"]
     if voz:
         corpo["options"] = {"voice": voz}
-    try:
-        resposta = requests.post(
-            f"{HA_URL}/api/services/tts/speak",
-            headers=_ha_headers(),
-            json=corpo,
-            timeout=(10, _espera_do_ha(fala)),
-        )
-        resposta.raise_for_status()
-        return True
-    except requests.Timeout:
-        logger.warning("Resumo: o HA nao respondeu a tempo ao tts.speak (a fala pode ter sido tocada mesmo assim).")
-        return False
-    except requests.RequestException:
-        logger.warning("Resumo: nao consegui tocar a voz premium no alto-falante.", exc_info=True)
-        return False
+    tentativas = 2 if voz and cfg.get("voz_en_padrao" if idioma == "en" else "voz_pt_padrao") else 1
+    for tentativa in range(tentativas):
+        try:
+            resposta = requests.post(
+                f"{HA_URL}/api/services/tts/speak",
+                headers=_ha_headers(),
+                json=corpo,
+                timeout=(10, _espera_do_ha(fala)),
+            )
+            resposta.raise_for_status()
+            return True
+        except requests.Timeout:
+            logger.warning("Resumo: o HA nao respondeu a tempo ao tts.speak (a fala pode ter sido tocada mesmo assim).")
+            return False
+        except requests.RequestException:
+            logger.warning("Resumo: nao consegui tocar a voz premium no alto-falante.", exc_info=True)
+            if tentativa + 1 < tentativas:
+                logger.info("Resumo: a voz padrao falhou; tentando de novo sem a opcao de voz.")
+                corpo = {k: v for k, v in corpo.items() if k != "options"}
+    return False
 
 
 def announce_on_satellite(fala: str, satelite: str) -> bool:
@@ -1838,9 +1859,9 @@ def handle(
             pass
     if cfg is not None and not speaker_ready(cfg, estados):
         estados = _esperar_alto_falante(cfg, estados, estados_fn, sono)
-    # Tocando TV/musica: nao interrompe. Cai no mesmo caminho do alto-falante
-    # indisponivel -- pedido de voz devolve o texto ao aparelho de voz; pedido
-    # automatico fala pelo satelite.
+    # Tocando TV/musica: so com SPEAKER_BUSY=voice (padrao e interromper, desde a 0.2.3) nao interrompe. Cai no mesmo
+    # caminho do alto-falante indisponivel -- pedido de voz devolve o texto ao aparelho de voz; pedido automatico fala
+    # pelo satelite.
     ocupado = (
         cfg is not None
         and cfg["ocupado"] == "voice"
