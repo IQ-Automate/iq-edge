@@ -20,6 +20,7 @@ schedule.py read (BRIEFING_OPTIONS); an option left empty sets nothing (the code
 import json
 import os
 import platform
+import re
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,17 +101,34 @@ BRIEFING_OPTIONS = {
     'prepare_minutes': 'IQ_BRIEFING_PREPARE_MINUTES',
     'prepare_at': 'IQ_BRIEFING_PREPARE_AT',
     'greet_names': 'IQ_BRIEFING_GREET_NAMES',
+    'trash_organic_days': 'IQ_BRIEFING_TRASH_ORGANIC_DAYS',
+    'trash_recycling_days': 'IQ_BRIEFING_TRASH_RECYCLING_DAYS',
 }
+WEEKDAYS = ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday')  # the position is the weekday number
+DAY_OPTIONS = ('trash_organic_days', 'trash_recycling_days')  # the only list options: weekday names
+
+
+def day_names(value):
+    """The valid weekday names in `value` (a list from the Supervisor, or text such as "tuesday, thursday" separated by commas,
+    semicolons or spaces), lower case, without repeats, in week order. Anything else is ignored; none valid: ()."""
+    if isinstance(value, str):
+        value = re.split(r'[\s,;]+', value)
+    chosen = {str(item).strip().lower() for item in value} if isinstance(value, list) else set()
+    return tuple(day for day in WEEKDAYS if day in chosen)
 
 
 def apply_briefing_options():
     """At start: each Bom dia option that is set becomes its IQ_BRIEFING_* variable. Returns the option names applied (for the log;
-    never the values)."""
+    never the values). A weekday option (a list in the Supervisor's file) becomes its valid names separated by commas."""
     data = options()
     applied = []
     for option, variable in BRIEFING_OPTIONS.items():
         value = data.get(option)
-        if value is None or isinstance(value, (dict, list)) or not str(value).strip():
+        if option in DAY_OPTIONS:
+            value = ','.join(day_names(value))
+        elif isinstance(value, (dict, list)):
+            continue
+        if value is None or not str(value).strip():
             continue
         os.environ[variable] = str(value).strip()[:200]
         applied.append(option)

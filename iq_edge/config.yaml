@@ -1,5 +1,5 @@
 name: IQ Edge
-version: "0.2.3"
+version: "0.2.4"
 slug: iq_edge
 description: Conecta esta casa à plataforma IQ Autom8 (pareamento por código) e traz o Bom dia editável na aba IQ.
 url: https://github.com/IQ-Automate/iq-edge
@@ -33,3 +33,7 @@ schema:
   prepare_minutes: int(0,180)?
   prepare_at: 'match(^([01][0-9]|2[0-3]):[0-5][0-9]$)?'
   greet_names: bool?
+  trash_organic_days:
+    - "list(monday|tuesday|wednesday|thursday|friday|saturday|sunday)?"
+  trash_recycling_days:
+    - "list(monday|tuesday|wednesday|thursday|friday|saturday|sunday)?"

@@ -30,7 +30,12 @@ class PackageTests(unittest.TestCase):
         # lote A5: the Bom dia's options are all optional (out of `options`, so they stay unset until someone fills them in)
         self.assertEqual(set(config['schema']), {'center_url', 'pairing_code'} | set(settings.BRIEFING_OPTIONS))
         self.assertEqual(config['schema']['greet_names'], 'bool?')  # 0.2.2: a switch; 0.2.3: unset = off (no names)
+        for key in settings.DAY_OPTIONS:  # 0.2.4: an optional list of weekday names (a one-element YAML list is the Supervisor's list form)
+            self.assertEqual(config['schema'][key], ['list(' + '|'.join(settings.WEEKDAYS) + ')?'], key)
+            self.assertNotIn(key, config['options'])
         for key, kind in config['schema'].items():
+            if key in settings.DAY_OPTIONS:
+                continue
             if key != 'center_url':
                 self.assertTrue(kind.endswith('?'), key)
             match = re.fullmatch(r'match\((.*)\)\??', kind)
@@ -74,13 +79,16 @@ class BriefingOptionsTests(EdgeCase):
             'center_url': 'https://business.iqautom8.com', 'pairing_code': '', 'weather_entity': 'weather.casa',
             'temp_sensor': 'sensor.fora', 'satellite': 'assist_satellite.cozinha', 'tts_voice': 'voz-pt', 'tts_voice_en': '',
             'speaker_delay': 3.5, 'speaker_wait': 12, 'speaker_busy': 'interrupt', 'card_seconds': 60, 'prepare_minutes': 45,
-            'prepare_at': '05:45', 'greet_names': False}, private=False)
+            'prepare_at': '05:45', 'greet_names': False, 'trash_organic_days': ['thursday', 'monday'],
+            'trash_recycling_days': ['saturday']}, private=False)
         applied = settings.apply_briefing_options()
         self.assertEqual(set(applied), set(settings.BRIEFING_OPTIONS) - {'tts_voice_en'})  # an empty option sets nothing
         self.assertEqual((os.environ['IQ_BRIEFING_WEATHER_ENTITY'], os.environ['IQ_BRIEFING_TEMP_SENSOR'], os.environ['IQ_BRIEFING_CARD_SECONDS'],
                           os.environ['IQ_BRIEFING_PREPARE_MINUTES'], os.environ['IQ_BRIEFING_PREPARE_AT']),
                          ('weather.casa', 'sensor.fora', '60', '45', '05:45'))
         self.assertNotIn('IQ_BRIEFING_TTS_VOICE_EN', os.environ)
+        self.assertEqual((os.environ['IQ_BRIEFING_TRASH_ORGANIC_DAYS'], os.environ['IQ_BRIEFING_TRASH_RECYCLING_DAYS']),
+                         ('monday,thursday', 'saturday'))  # the Supervisor's list becomes the valid names, in week order
         self.assertEqual(os.environ['IQ_BRIEFING_GREET_NAMES'], 'False')  # the Supervisor's JSON false, as text
         from iq_edge import briefing, prefs, schedule
         self.assertFalse(briefing._nomes_ligados())
@@ -108,6 +116,36 @@ class BriefingOptionsTests(EdgeCase):
         (settings.data_dir() / 'options.json').unlink()  # no options file at all
         self.assertEqual(settings.apply_briefing_options(), [])
         self.assertFalse(briefing._nomes_ligados())
+
+    def test_weekday_options_list_string_or_invalid(self):
+        """0.2.4: `trash_organic_days` and `trash_recycling_days` come from the Supervisor as a list; the variable is the valid names
+        separated by commas (lower case, no repeats, week order). A plain string works too; other options still skip a list."""
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        variable = 'IQ_BRIEFING_TRASH_ORGANIC_DAYS'
+        cases = (
+            (['tuesday', 'friday'], 'tuesday,friday'),
+            (['Friday', ' TUESDAY ', 'friday', 'tuesday'], 'tuesday,friday'),  # case, spaces and repeats
+            (['sunday', 'funday', 7, None, {'a': 1}], 'sunday'),  # only the seven names count
+            ('tuesday, thursday', 'tuesday,thursday'),  # a plain string
+            ('Thursday;monday saturday', 'monday,thursday,saturday'),
+            ([], None), ('', None), (None, None), (['someday'], None), ('someday', None), (5, None), (True, None), ({'monday': 1}, None),
+        )
+        for value, expected in cases:
+            os.environ.pop(variable, None)
+            settings.write_json(settings.data_dir() / 'options.json', {'center_url': 'https://business.iqautom8.com',
+                                'trash_organic_days': value}, private=False)
+            applied = settings.apply_briefing_options()
+            self.assertEqual(os.environ.get(variable), expected, value)  # nothing valid: nothing set
+            self.assertEqual('trash_organic_days' in applied, expected is not None, value)
+        self.assertNotIn('IQ_BRIEFING_TRASH_RECYCLING_DAYS', os.environ)
+        settings.write_json(settings.data_dir() / 'options.json', {'center_url': 'https://business.iqautom8.com',
+                            'weather_entity': ['weather.casa'], 'greet_names': ['true']}, private=False)
+        os.environ.pop('IQ_BRIEFING_WEATHER_ENTITY', None)
+        os.environ.pop('IQ_BRIEFING_GREET_NAMES', None)
+        self.assertEqual(settings.apply_briefing_options(), [])  # a list in another option is still skipped
+        self.assertEqual(settings.day_names('Monday, someday'), ('monday',))
 
 
 if __name__ == '__main__':
