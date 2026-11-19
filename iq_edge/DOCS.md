@@ -151,6 +151,12 @@ comportamento.
 | `prepare_minutes` | Minutos antes do horário para preparar o Bom dia (0 a 180; 0 desliga). | 30 |
 | `prepare_at` | Hora de começar a preparar numa casa sem horário que usa o evento (`HH:MM`). | 06:00 |
 | `greet_names` | Cumprimenta pelo nome de quem está em casa. Com `true`, fala os nomes. Sem nomes (vazio ou `false`), fala só "Bom dia." e os nomes também saem do cartão Casa e do pedido à plataforma. | sem nomes |
+| `trash_organic_days` | Os dias da semana do lixo orgânico. Escreva-os em inglês: `monday` = segunda, `tuesday` = terça, `wednesday` = quarta, `thursday` = quinta, `friday` = sexta, `saturday` = sábado, `sunday` = domingo. Nos dias marcados, todo Bom dia termina com um lembrete para colocar o lixo para fora. | sem lembrete |
+| `trash_recycling_days` | Os dias da semana do lixo reciclável, escritos do mesmo jeito. Se os dois lixos caem no mesmo dia, o lembrete fala dos dois. | sem lembrete |
+
+**Lembrete do lixo (0.2.4).** O lembrete é uma frase fixa, no fim da fala. Por exemplo: "E não esqueça: hoje é dia do lixo orgânico.
+Coloque o lixo orgânico para fora." O dia vale no fuso da casa (o do Home Assistant). A IA não escreve a frase e a plataforma não
+a recebe. O botão **Testar** também mostra o lembrete.
 
 ## Problemas comuns
 
@@ -204,7 +210,9 @@ summary's data) and falls back to the rule text; it is prepared ahead so it is s
 with the event `iq_bom_dia` (optional `event_data: {language: en}`). When the speech ends, the add-on fires the event
 `iq_bom_dia_done` (`spoken`: true or false, `language`), so an automation can wait for it, for example to start the background
 music. The good morning options (`weather_entity`, `temp_sensor`, `satellite`, voices, waits, `card_seconds`, `prepare_minutes`,
-`prepare_at`, `greet_names`) are in the add-on's configuration. Since 0.2.3 an empty option means the IQ default: the speech
+`prepare_at`, `greet_names`, `trash_organic_days`, `trash_recycling_days`) are in the add-on's configuration. Since 0.2.4, on the
+weekdays marked in `trash_organic_days` and `trash_recycling_days` (written in English: `monday` to `sunday`), every good
+morning ends with a fixed reminder to take the trash out (in the home's time zone); empty means no reminder. Since 0.2.3 an empty option means the IQ default: the speech
 plays over the TV or music (`speaker_busy: interrupt`), says only "Good morning." with no names (in the speech, on the Home card
 or in the request to the platform), and, with ElevenLabs, uses the IQ voice. `speaker_busy: voice`, `greet_names: true` and a
 voice id in `tts_voice` bring back the old behavior.

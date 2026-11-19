@@ -2089,6 +2089,204 @@ class PreferenciasDoCentroTests(unittest.TestCase):
             briefing.preview(dict(PREFS_DO_CENTRO, sources=[]), "pt")
 
 
+# --------------------------------------------------------------------------
+# 0.2.4: lembrete do lixo (opcoes trash_organic_days e trash_recycling_days)
+# --------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+SEGUNDA, TERCA, QUARTA, QUINTA, SEXTA, SABADO, DOMINGO = range(7)
+FRASES_DO_LIXO = {
+    "pt": {
+        "organico": "E não esqueça: hoje é dia do lixo orgânico. Coloque o lixo orgânico para fora.",
+        "reciclavel": "E não esqueça: hoje é dia do lixo reciclável. Coloque o lixo reciclável para fora.",
+        "ambos": "E não esqueça: hoje é dia do lixo orgânico e do lixo reciclável. Coloque os dois para fora.",
+    },
+    "en": {
+        "organico": "And don't forget: today is trash day. Take the trash out.",
+        "reciclavel": "And don't forget: today is recycling day. Take the recycling out.",
+        "ambos": "And don't forget: today is trash and recycling day. Take both out.",
+    },
+}
+VARIAVEIS_DO_LIXO = ("IQ_BRIEFING_TRASH_ORGANIC_DAYS", "IQ_BRIEFING_TRASH_RECYCLING_DAYS")
+# terca 17/11/2026 23:30 UTC: ainda terca no relogio do container (UTC) e ja quarta (12:30) na Nova Zelandia (UTC+13)
+TERCA_A_NOITE_UTC = datetime(2026, 11, 17, 23, 30, tzinfo=timezone.utc)
+NOVA_ZELANDIA = timezone(timedelta(hours=13))
+
+
+def _relogio_fixo(instante: datetime):
+    """O `agora_fn(fuso)` dos testes: o instante fixo, visto no fuso da casa (ou como esta, sem fuso); guarda os fusos pedidos."""
+    pedidos: list = []
+
+    def agora(fuso):
+        pedidos.append(fuso)
+        return instante.astimezone(fuso) if fuso else instante
+
+    agora.pedidos = pedidos  # type: ignore[attr-defined]
+    return agora
+
+
+def _relogio_proibido(fuso):
+    raise AssertionError("o relogio nao devia ser lido")
+
+
+class LixoDoDiaTest(unittest.TestCase):
+    """0.2.4: nos dias marcados, TODO Bom dia termina com a frase fixa do lixo (no fuso da casa); opcoes vazias = nada muda."""
+
+    def setUp(self) -> None:
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for variavel in VARIAVEIS_DO_LIXO:
+            os.environ.pop(variavel, None)
+        for alvo, valor in (("iq_edge.briefing._ai_client", None), ("iq_edge.schedule.ha_time_zone", "")):
+            patcher = mock.patch(alvo, return_value=valor)  # sem IA e sem ler o Home Assistant (o fuso vazio = relogio local)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _dias(self, organico="", reciclavel=""):
+        return mock.patch.dict(os.environ, {"IQ_BRIEFING_TRASH_ORGANIC_DAYS": organico, "IQ_BRIEFING_TRASH_RECYCLING_DAYS": reciclavel})
+
+    def test_as_frases_fixas_nos_dois_idiomas(self) -> None:
+        with self._dias("tuesday,friday", "friday,saturday"):
+            for idioma, frases in FRASES_DO_LIXO.items():
+                self.assertEqual(briefing.lembrete_do_lixo(idioma, TERCA), frases["organico"])
+                self.assertEqual(briefing.lembrete_do_lixo(idioma, SABADO), frases["reciclavel"])
+                self.assertEqual(briefing.lembrete_do_lixo(idioma, SEXTA), frases["ambos"])  # os dois no mesmo dia: uma frase so
+                for dia in (SEGUNDA, QUARTA, QUINTA, DOMINGO):
+                    self.assertEqual(briefing.lembrete_do_lixo(idioma, dia), "")
+
+    def test_opcoes_vazias_nada_muda(self) -> None:
+        fala = "  Bom dia. Tudo certo.  "  # exatamente como veio: nem os espacos mudam
+        for organico, reciclavel in (("", ""), ("  ", ""), (",;", " "), ("banana", "someday")):
+            with self._dias(organico, reciclavel):
+                for dia in range(7):
+                    self.assertEqual(briefing.lembrete_do_lixo("pt", dia), "")
+                self.assertIs(briefing.com_lembrete_do_lixo(fala, "pt", _relogio_proibido), fala)  # nem le o relogio
+        self.assertIs(briefing.com_lembrete_do_lixo(fala, "en", _relogio_proibido), fala)  # variaveis ausentes
+        with self._dias("tuesday"):  # marcada, mas hoje e outro dia: a mesma fala
+            self.assertIs(briefing.com_lembrete_do_lixo(fala, "pt", _relogio_fixo(TERCA_A_NOITE_UTC + timedelta(days=1))), fala)
+
+    def test_nomes_invalidos_sao_ignorados_e_o_texto_corrido_vale(self) -> None:
+        for valor in ("tuesday, banana ,FRIDAY;;", "Friday tuesday friday", " TUESDAY,friday,, funday "):
+            with self._dias(valor):
+                self.assertEqual({d for d in range(7) if briefing.lembrete_do_lixo("pt", d)}, {TERCA, SEXTA}, valor)
+        with self._dias("tuesday", "wednesday thursday"):
+            self.assertEqual({d: bool(briefing.lembrete_do_lixo("en", d)) for d in range(7)},
+                             {d: d in (TERCA, QUARTA, QUINTA) for d in range(7)})
+
+    def test_o_lembrete_vai_no_fim_depois_de_um_espaco(self) -> None:
+        with self._dias("tuesday"):
+            self.assertEqual(briefing.com_lembrete_do_lixo("Bom dia. Tudo certo.", "pt", _relogio_fixo(TERCA_A_NOITE_UTC)),
+                             "Bom dia. Tudo certo. " + FRASES_DO_LIXO["pt"]["organico"])
+            self.assertEqual(briefing.com_lembrete_do_lixo("Good morning.", "en", _relogio_fixo(TERCA_A_NOITE_UTC)),
+                             "Good morning. " + FRASES_DO_LIXO["en"]["organico"])
+
+    def test_o_dia_e_o_da_casa_e_nao_o_do_relogio_do_container(self) -> None:
+        agora = _relogio_fixo(TERCA_A_NOITE_UTC)
+        fusos = {"Pacific/Auckland": NOVA_ZELANDIA}
+        with self._dias("tuesday", "wednesday"), mock.patch("iq_edge.schedule.ha_time_zone", return_value="Pacific/Auckland"), \
+                mock.patch("iq_edge.schedule._zone", side_effect=lambda nome: fusos.get(nome)):
+            self.assertEqual(briefing._hoje_na_casa(agora), QUARTA)  # na casa ja e quarta; no container (UTC) ainda e terca
+            self.assertEqual(agora.pedidos, [NOVA_ZELANDIA])
+            self.assertEqual(briefing.com_lembrete_do_lixo("Bom dia.", "pt", agora), "Bom dia. " + FRASES_DO_LIXO["pt"]["reciclavel"])
+        with self._dias("tuesday", "wednesday"):  # fuso nao lido: vale o relogio local, que aqui e o do instante dado
+            self.assertEqual(briefing.com_lembrete_do_lixo("Bom dia.", "pt", agora), "Bom dia. " + FRASES_DO_LIXO["pt"]["organico"])
+            self.assertEqual(agora.pedidos[-1], None)
+
+    def test_fuso_ilegivel_cai_no_relogio_local(self) -> None:
+        agora = _relogio_fixo(TERCA_A_NOITE_UTC)
+        with mock.patch("iq_edge.schedule.ha_time_zone", side_effect=RuntimeError("sem Home Assistant")):
+            self.assertEqual(briefing._hoje_na_casa(agora), TERCA)
+        with mock.patch("iq_edge.schedule.ha_time_zone", return_value="Nowhere/Land"):  # nome que nao existe
+            self.assertEqual(briefing._hoje_na_casa(agora), TERCA)
+        self.assertEqual(agora.pedidos, [None, None])
+        self.assertIn(briefing._hoje_na_casa(), range(7))  # sem relogio dado: o de agora, sem erro
+
+    def test_pedido_de_voz_compoe_na_hora_e_o_centro_nao_ve_o_lembrete(self) -> None:
+        for idioma, texto in (("pt", "bom dia"), ("en", "good morning")):
+            cliente, pedidos = centro_falso({"text": "Tudo certo por aqui.", "picks": []})
+            with self._dias("friday", "tuesday"):
+                fala = briefing.handle(
+                    texto, fetch_states_fn=lambda: ESTADOS, fetch_forecast_fn=lambda e: PREVISAO,
+                    fetch_feed_fn=lambda url, n: ["Manchete"], publish_fn=lambda c, d: True, client=cliente,
+                    feeds=[("Orlando", "https://o")], agora_fn=_relogio_fixo(TERCA_A_NOITE_UTC),
+                )
+            self.assertEqual(fala, "Tudo certo por aqui. " + FRASES_DO_LIXO[idioma]["reciclavel"])
+            texto_do_pedido = json.dumps(pedidos[0], ensure_ascii=False).lower()
+            self.assertNotIn("lixo", texto_do_pedido)  # o lembrete nao e parte do pedido ao centro
+            self.assertNotIn("trash", texto_do_pedido)
+
+    def test_o_limite_de_tamanho_nunca_corta_o_lembrete(self) -> None:
+        longo = "Bom dia " + "palavra " * 700  # bem acima de 4000 caracteres: o limite corta a fala da IA
+        cliente, _ = centro_falso({"text": longo, "picks": []})
+        with self._dias("tuesday"):
+            fala = briefing.handle(
+                "bom dia", fetch_states_fn=lambda: ESTADOS, fetch_forecast_fn=lambda e: PREVISAO,
+                fetch_feed_fn=lambda url, n: [], publish_fn=lambda c, d: True, client=cliente, feeds=[],
+                agora_fn=_relogio_fixo(TERCA_A_NOITE_UTC),
+            )
+        frase = FRASES_DO_LIXO["pt"]["organico"]
+        self.assertTrue(fala.endswith(" " + frase))
+        corpo = fala[: -len(frase) - 1]
+        self.assertTrue(3990 < len(corpo) <= 4000, len(corpo))  # a fala da IA foi cortada no limite; o lembrete ficou inteiro
+
+    def test_sem_a_opcao_a_fala_composta_e_a_de_sempre(self) -> None:
+        argumentos = dict(
+            fetch_states_fn=lambda: ESTADOS, fetch_forecast_fn=lambda e: PREVISAO, fetch_feed_fn=lambda url, n: ["Manchete"],
+            publish_fn=lambda c, d: True, client=None, feeds=[("Orlando", "https://o")],
+        )
+        sem = briefing.handle("bom dia", **argumentos)
+        com_a_opcao_vazia = briefing.handle("bom dia", agora_fn=_relogio_proibido, **argumentos)
+        self.assertEqual(sem, com_a_opcao_vazia)
+        self.assertNotIn("lixo", sem)
+        with self._dias("tuesday"):
+            com = briefing.handle("bom dia", agora_fn=_relogio_fixo(TERCA_A_NOITE_UTC), **argumentos)
+        self.assertEqual(com, sem + " " + FRASES_DO_LIXO["pt"]["organico"])
+
+    def test_bom_dia_preparado_tambem_termina_com_o_lembrete(self) -> None:
+        extras = [
+            {"entity_id": "media_player.living", "state": "idle", "attributes": {}},
+            {"entity_id": "tts.elevenlabs_text_to_speech", "state": "unknown", "attributes": {}},
+        ]
+        env = {"IQ_BRIEFING_SPEAKER": "media_player.living", "IQ_BRIEFING_TTS_ENGINE": "tts.elevenlabs_text_to_speech",
+               "IQ_BRIEFING_SATELLITE": "", "IQ_BRIEFING_SPEAKER_VOLUME": "", "IQ_BRIEFING_FEEDS": ""}
+        for idioma, dia, esperado in (("pt", TERCA_A_NOITE_UTC, "organico"), ("en", TERCA_A_NOITE_UTC, "organico"),
+                                      ("pt", TERCA_A_NOITE_UTC + timedelta(days=1), None)):
+            falas = []
+            with mock.patch.dict(os.environ, env), self._dias("tuesday"):
+                pronto, _ = briefing.preparar(idioma, fetch_states_fn=lambda: ESTADOS + extras, fetch_forecast_fn=lambda e: PREVISAO,
+                                              fetch_feed_fn=lambda url, n: [], client=None)
+                self.assertNotIn("lixo", pronto["text"])  # o texto guardado nunca leva o lembrete: ele entra na hora de falar
+                self.assertNotIn("trash", pronto["text"])
+                briefing.handle(
+                    "bom dia automatico", pronto=pronto, idioma_pedido=idioma, fetch_states_fn=lambda: ESTADOS + extras,
+                    publish_fn=lambda c, d: True, speak_fn=lambda fala, lingua, cfg: falas.append(fala) or True,
+                    spawn_fn=lambda f: f(), sleep_fn=lambda s: None, done_fn=lambda spoken, lingua: None,
+                    agora_fn=_relogio_fixo(dia),
+                )
+            self.assertEqual(len(falas), 1)
+            if esperado:
+                self.assertTrue(falas[0].endswith(" " + FRASES_DO_LIXO[idioma][esperado]), falas[0])
+            else:
+                self.assertNotIn("lixo", falas[0])
+
+    def test_testar_mostra_o_lembrete_e_a_falha_da_casa_nao(self) -> None:
+        cliente, pedidos = _cliente_falso("Bom dia, Victtor.")
+        argumentos = dict(fetch_forecast_fn=lambda e: None, fetch_feed_fn=lambda url, n: ["Manchete"], client=cliente)
+        with self._dias("tuesday"):
+            resposta = briefing.preview(PREFS_DO_CENTRO, "pt", fetch_states_fn=lambda: ESTADOS, agora_fn=_relogio_fixo(TERCA_A_NOITE_UTC),
+                                        **argumentos)
+            self.assertEqual(resposta["text"], "Bom dia, Victtor. " + FRASES_DO_LIXO["pt"]["organico"])
+            self.assertEqual(resposta["words"], len(resposta["text"].split()))
+            self.assertNotIn("lixo", json.dumps(pedidos[0], ensure_ascii=False))
+            falha = briefing.preview(PREFS_DO_CENTRO, "pt", fetch_states_fn=lambda: [], agora_fn=_relogio_fixo(TERCA_A_NOITE_UTC),
+                                     **argumentos)
+            self.assertEqual(falha["text"], briefing._T["pt"]["falha_casa"])  # sem casa nao ha Bom dia: sem lembrete
+        vazio = briefing.preview(PREFS_DO_CENTRO, "pt", fetch_states_fn=lambda: ESTADOS, agora_fn=_relogio_proibido, **argumentos)
+        self.assertEqual(vazio["text"], "Bom dia, Victtor.")
+
+
 if __name__ == "__main__":
     unittest.main()
 

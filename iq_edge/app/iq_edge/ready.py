@@ -10,7 +10,8 @@ after 90 minutes, at most twice) and when to discard (`until`, the end of its wi
 
 After preparing, when the text changed, Home Assistant is asked (best effort) to generate and cache the voice of the speech as it would be now
 (POST /api/tts_get_url, same engine, message, language and voice as tts.speak): when the house did not change (same people,
-nothing new open), the speech comes from that cache. Nothing is played then."""
+nothing new open), the speech comes from that cache. Nothing is played then. The trash reminder of the day (options
+trash_organic_days and trash_recycling_days) is the end of the speech, so it is part of the cached message too."""
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -75,5 +76,14 @@ def prepare(language, now=None, precache=True, until=None, **fns):
     if precache and not (before and before.get('text') == data['text'] and before.get('language') == language):
         cfg = briefing.speaker_config()
         if cfg is not None:
-            briefing.precache_tts(briefing.juntar_fala(prefix, data['text']), language, cfg)
+            message = briefing.com_lembrete_do_lixo(briefing.juntar_fala(prefix, data['text']), language, _clock_at(now))
+            briefing.precache_tts(message, language, cfg)
     return data
+
+
+def _clock_at(now):
+    """The clock for the trash reminder's weekday: `now` (the moment of this preparation) in the home's zone; today's clock when
+    there is no `now`. The reminder is part of the cached message, so it must be the one the speech will have."""
+    if now is None:
+        return None
+    return lambda zone: now.astimezone(zone) if zone else now

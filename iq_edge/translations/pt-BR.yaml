@@ -41,3 +41,9 @@ configuration:
   greet_names:
     name: Bom dia — cumprimentar pelo nome
     description: Ligado, cumprimenta pelo nome de quem está em casa. Vazio ou desligado (padrão), fala só "Bom dia." e não usa nomes.
+  trash_organic_days:
+    name: Dias do lixo orgânico
+    description: "Os dias da semana do lixo orgânico. Os dias são escritos em inglês: monday = segunda, tuesday = terça, wednesday = quarta, thursday = quinta, friday = sexta, saturday = sábado, sunday = domingo. Nos dias marcados, todo Bom dia termina com um lembrete para colocar o lixo para fora. Vazio (padrão): sem lembrete."
+  trash_recycling_days:
+    name: Dias do lixo reciclável
+    description: "Os dias da semana do lixo reciclável. Os dias são escritos em inglês: monday = segunda, tuesday = terça, wednesday = quarta, thursday = quinta, friday = sexta, saturday = sábado, sunday = domingo. Nos dias marcados, todo Bom dia termina com um lembrete para colocar o lixo para fora. Vazio (padrão): sem lembrete."

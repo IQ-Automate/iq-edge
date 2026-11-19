@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4
+
+- Duas opções novas, `trash_organic_days` e `trash_recycling_days`: os dias da semana do lixo orgânico e do lixo reciclável
+  (escritos em inglês: `monday` a `sunday`). Nos dias marcados, todo Bom dia termina com uma frase fixa de lembrete, por
+  exemplo "E não esqueça: hoje é dia do lixo orgânico. Coloque o lixo orgânico para fora." (em inglês: "And don't forget:
+  today is trash day. Take the trash out."). Se os dois lixos caem no mesmo dia, a frase fala dos dois.
+- O dia vale no fuso da casa (o do Home Assistant). A frase vem depois do limite de tamanho da fala, não vai à plataforma e não
+  é escrita pela IA. O botão Testar também mostra o lembrete, e o áudio preparado antes já leva a frase.
+- **O que muda ao atualizar:** nada. Com as duas opções vazias, o Bom dia fica exatamente como era.
+
 ## 0.2.3
 
 - Padrão IQ: o que ficava vazio na aba Configuração agora vale o comportamento da empresa, sem preencher nada em cada casa.

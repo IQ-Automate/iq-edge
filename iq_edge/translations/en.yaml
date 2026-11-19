@@ -41,3 +41,9 @@ configuration:
   greet_names:
     name: Good morning — greet by name
     description: On, greets the people at home by name. Empty or off (default), it says only "Good morning." and uses no names.
+  trash_organic_days:
+    name: Trash days
+    description: The weekdays of the organic trash. On a marked day, every good morning ends with a reminder to take it out. Empty (default) means no reminder.
+  trash_recycling_days:
+    name: Recycling days
+    description: The weekdays of the recyclable trash. On a marked day, every good morning ends with a reminder to take it out. Empty (default) means no reminder.
