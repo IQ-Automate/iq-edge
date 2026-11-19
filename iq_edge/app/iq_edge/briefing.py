@@ -52,6 +52,12 @@ Configuracao (variaveis lidas na hora, todas opcionais):
                               o cartao Casa nao tem "Em casa: ..." e o pedido ao centro leva `names`
                               vazio; com "sim", a fala traz os nomes de quem esta em casa
                               (opcao greet_names do add-on; o centro nao tem preferencia disto)
+  IQ_BRIEFING_TRASH_ORGANIC_DAYS, IQ_BRIEFING_TRASH_RECYCLING_DAYS
+                              dias da semana do lixo organico e do reciclavel, em ingles e separados por virgula
+                              (ex.: monday,thursday); opcoes trash_organic_days e trash_recycling_days do add-on
+                              (0.2.4). Vazio, nada muda. Em dia marcado (no fuso da casa) TODO Bom dia termina com a
+                              frase fixa do lembrete (_T lixo_*), depois do limite de tamanho; o lembrete nao vai ao
+                              centro nem e escrito pela IA
   IQ_BRIEFING_TOTAL           total de noticias somando as fontes, ex.: "6-7" (sem padrao)
   IQ_BRIEFING_PREFS_FILE      arquivo das preferencias vindas do centro (lote H2; padrao
                               /opt/iq-assistant/data/briefing-prefs.json)
@@ -718,6 +724,9 @@ _T = {
         "tudo_fechado": "Tudo fechado",
         "noticias_fonte": "Em {fonte}: {titulos}.",
         "ou": "ou",
+        "lixo_organico": "E não esqueça: hoje é dia do lixo orgânico. Coloque o lixo orgânico para fora.",
+        "lixo_reciclavel": "E não esqueça: hoje é dia do lixo reciclável. Coloque o lixo reciclável para fora.",
+        "lixo_ambos": "E não esqueça: hoje é dia do lixo orgânico e do lixo reciclável. Coloque os dois para fora.",
         "lingua": "português do Brasil", "palavras": 110,
     },
     "en": {
@@ -739,6 +748,9 @@ _T = {
         "tudo_fechado": "All closed",
         "noticias_fonte": "In {fonte}: {titulos}.",
         "ou": "or",
+        "lixo_organico": "And don't forget: today is trash day. Take the trash out.",
+        "lixo_reciclavel": "And don't forget: today is recycling day. Take the recycling out.",
+        "lixo_ambos": "And don't forget: today is trash and recycling day. Take both out.",
         "lingua": "American English", "palavras": 105,
     },
 }
@@ -966,6 +978,44 @@ def prefixo_da_hora(dados: dict[str, Any], idioma: str) -> str:
 
 def juntar_fala(prefixo: str, corpo: str) -> str:
     return " ".join(parte for parte in (prefixo.strip(), corpo.strip()) if parte)
+
+
+def _dias_do_lixo(tipo: str) -> set[int]:
+    """Os dias da semana (0 = segunda) de IQ_BRIEFING_TRASH_<tipo>_DAYS (ORGANIC ou RECYCLING); nomes desconhecidos sao ignorados."""
+    nomes = settings.day_names(os.getenv(f"IQ_BRIEFING_TRASH_{tipo}_DAYS", ""))
+    return {settings.WEEKDAYS.index(nome) for nome in nomes}
+
+
+def lembrete_do_lixo(idioma: str, dia_da_semana: int) -> str:
+    """A frase fixa do lixo para esse dia da semana (0 = segunda), ou "" se nenhum dos dois lixos e desse dia (ou se as opcoes
+    estao vazias). E uma frase fixa: nunca vai ao centro nem e escrita pela IA."""
+    organico = dia_da_semana in _dias_do_lixo("ORGANIC")
+    reciclavel = dia_da_semana in _dias_do_lixo("RECYCLING")
+    if not (organico or reciclavel):
+        return ""
+    return _T[idioma]["lixo_ambos" if organico and reciclavel else "lixo_organico" if organico else "lixo_reciclavel"]
+
+
+def _hoje_na_casa(agora_fn: Callable[[Any], datetime] | None = None) -> int:
+    """O dia da semana de HOJE (0 = segunda) no fuso da casa (o time_zone do Home Assistant, o mesmo do horario do Bom dia;
+    schedule.ha_time_zone le de novo so a cada hora). Sem o fuso, vale o relogio local. `agora_fn(fuso)` devolve o instante
+    (padrao datetime.now): e por onde os testes fixam o dia."""
+    try:
+        from . import schedule  # import tardio: o schedule importa este modulo
+
+        fuso = schedule._zone(schedule.ha_time_zone())
+    except Exception:
+        fuso = None
+    return (agora_fn or datetime.now)(fuso).weekday()
+
+
+def com_lembrete_do_lixo(fala: str, idioma: str, agora_fn: Callable[[Any], datetime] | None = None) -> str:
+    """A fala pronta com a frase do lixo no FIM, quando hoje e dia marcado; do contrario, a mesma fala, sem nem ler o relogio
+    (opcoes vazias = nada muda). Entra depois do limite de tamanho da fala, so na hora de falar."""
+    if not (_dias_do_lixo("ORGANIC") or _dias_do_lixo("RECYCLING")):
+        return fala
+    lembrete = lembrete_do_lixo(idioma, _hoje_na_casa(agora_fn))
+    return juntar_fala(fala, lembrete) if lembrete else fala
 
 
 def build_spoken_fallback(
@@ -1759,14 +1809,16 @@ def preview(
     fetch_forecast_fn: Callable[[str], dict[str, Any] | None] | None = None,
     fetch_feed_fn: Callable[[str, int], list[str]] | None = None,
     client: Any | None = None,
+    agora_fn: Callable[[Any], datetime] | None = None,
 ) -> dict[str, Any]:
     """POST /v1/briefing-preview ("Testar" no centro): o texto com ESTAS preferencias, sem publicar cartao, sem falar
-    e sem gravar nada. ValueError se as preferencias forem invalidas."""
+    e sem gravar nada. ValueError se as preferencias forem invalidas. Com o lixo marcado para hoje, a frase do lembrete vem
+    no fim, como na fala."""
     inicio = time.monotonic()
     with usando_prefs(prefs) as limpas:
         lingua = idioma if idioma in _T else limpas["language"]
         composto = _compor(lingua, fetch_states_fn or fetch_states, fetch_forecast_fn, fetch_feed_fn, client, None)
-    fala = composto[0] if composto else _T[lingua]["falha_casa"]
+    fala = com_lembrete_do_lixo(composto[0], lingua, agora_fn) if composto else _T[lingua]["falha_casa"]
     return {
         "text": fala,
         "words": len(fala.split()),
@@ -1795,6 +1847,7 @@ def handle(
     pronto: dict[str, Any] | None = None,
     done_fn: Callable[[bool, str], Any] | None = None,
     clock_fn: Callable[[], float] | None = None,
+    agora_fn: Callable[[Any], datetime] | None = None,
 ) -> str | None:
     """Se `texto` pede o resumo, devolve a fala (e publica os cartoes no
     painel). Se nao pede, devolve None e quem chamou segue o fluxo normal.
@@ -1802,7 +1855,8 @@ def handle(
     `pronto` (o Bom dia preparado, ready.fresh): no pedido automatico, a fala e o prefixo da hora (cumprimento e casa
     com os estados de agora) + o texto pronto, sem RSS nem IA; idioma diferente = compoe na hora.
     `done_fn` (padrao publish_done) e `clock_fn` (padrao time.monotonic): so o pedido automatico avisa o HA, com o evento
-    iq_bom_dia_done, quando a fala termina (ou na hora, com spoken false, se nada for falado); o pedido de voz nao."""
+    iq_bom_dia_done, quando a fala termina (ou na hora, com spoken false, se nada for falado); o pedido de voz nao.
+    `agora_fn(fuso)` (padrao datetime.now): o instante que diz o dia da semana do lembrete do lixo (so os testes trocam)."""
     idioma = detect_briefing(texto)
     if idioma is None:
         return None
@@ -1828,7 +1882,7 @@ def handle(
             _avisar_fim(fim, idioma)  # HA sem resposta: nada falado
             return _T[idioma]["falha_casa"]
         dados = _dados_da_casa(estados)
-        fala = juntar_fala(prefixo_da_hora(dados, idioma), pronto["text"])
+        fala = com_lembrete_do_lixo(juntar_fala(prefixo_da_hora(dados, idioma), pronto["text"]), idioma, agora_fn)
         cartoes = [dict(c) for c in pronto.get("cards") or [] if isinstance(c, dict)]
         if _casa_ligada():
             cartoes.insert(1 if pronto.get("weather_card") and cartoes else 0, _cartao_casa(dados, idioma))
@@ -1838,6 +1892,7 @@ def handle(
             _avisar_fim(fim, idioma)  # HA sem resposta: nada falado
             return _T[idioma]["falha_casa"]
         fala, noticias, dados, previsao, estados = composto
+        fala = com_lembrete_do_lixo(fala, idioma, agora_fn)  # depois do limite de tamanho: o lembrete nunca e cortado
         cartoes = build_cards(dados, previsao, noticias, idioma)
     try:
         publicar(cartoes, duracao)

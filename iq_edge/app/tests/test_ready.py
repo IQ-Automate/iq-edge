@@ -237,3 +237,31 @@ class VoiceCacheTests(ReadyCase):
         self.assertEqual(data['text'], 'Hoje tem obras na avenida.')
         self.assertEqual(len(self.ha.tts_requests), 1)
         self.assertIsNotNone(ready.fresh('pt'))
+
+    def test_the_trash_reminder_is_part_of_the_cached_message(self):
+        """0.2.4: the reminder of the day ends the speech, so the cached audio carries it. Its weekday is the one of the preparation
+        moment (`now`), in the home's zone; a day that is not marked caches the speech as it always was."""
+        tuesday = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
+        base = 'Bom dia, Franco. A casa está toda fechada. Hoje tem obras na avenida.'
+        reminder = 'E não esqueça: hoje é dia do lixo orgânico. Coloque o lixo orgânico para fora.'
+        with mock.patch.dict(os.environ, {'IQ_BRIEFING_TRASH_ORGANIC_DAYS': 'tuesday'}), \
+                mock.patch.object(schedule, 'ha_time_zone', return_value=''):
+            ready.prepare('pt', now=tuesday)
+            ready.discard()  # the same text again would not be cached again
+            ready.prepare('pt', now=tuesday + timedelta(days=1))
+        self.assertEqual([request['message'] for request in self.ha.tts_requests], [base + ' ' + reminder, base])
+
+    def test_the_cached_message_is_the_one_spoken_with_the_reminder(self):
+        every_day = 'monday,tuesday,wednesday,thursday,friday,saturday,sunday'  # marked every day: the test never depends on the date
+        with mock.patch.dict(os.environ, {'IQ_BRIEFING_TRASH_ORGANIC_DAYS': every_day, 'IQ_BRIEFING_TRASH_RECYCLING_DAYS': every_day}):
+            ready.prepare('pt')
+            self.assertEqual(prefs.speak_now(), (True, 'Um instante.'))
+            for _ in range(100):
+                calls = [body for path, body in self.ha.service_calls if path == '/api/services/tts/speak']
+                if calls:
+                    break
+                time.sleep(0.05)
+        cached = self.ha.tts_requests[0]['message']
+        self.assertEqual(cached, 'Bom dia, Franco. A casa está toda fechada. Hoje tem obras na avenida. '
+                                 'E não esqueça: hoje é dia do lixo orgânico e do lixo reciclável. Coloque os dois para fora.')
+        self.assertEqual(calls[0]['message'], cached)  # the audio made ahead is the audio of the speech
