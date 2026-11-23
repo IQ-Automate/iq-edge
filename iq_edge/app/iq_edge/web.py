@@ -1,7 +1,8 @@
 """The add-on's tab in Home Assistant (ingress, port 8099): "Estado" (paired or not, last contact, version, the center's AI for the Bom
 dia, the Bom dia prepared ahead, Home Assistant's event iq_bom_dia, Parear / Desparear) and
 "Bom dia" (sources, how many, total, words, rules, speaker among the home's media_player, volume, voice engine, language, unit, the
-automatic speech's time and days; "Testar" shows the text, "Salvar" keeps it here and sends it to the platform, "Falar agora") and
+automatic speech's time and days; "Testar" shows the text, "Salvar" keeps it here and sends it to the platform, "Falar agora",
+"Repetir o último": 0.2.6, plays the saved audio of the last Bom dia again, never the voice engine) and
 "Assistente" (0.2.5: with the voice router off it says so and which options turn it on; with it running, the address, user and
 password to type in the integration "webhook-conversation", the mode, the kind of agent chosen (the entity, or only "agent by address":
 never the address) and the counters since the start; never a word of a request).
@@ -51,6 +52,13 @@ MODES = {'on': ('Ligado: o centro decide para onde vai cada pedido', 'On: the ce
          'observe': ('Observando: tudo vai ao assistente; o centro só é consultado e a decisão é contada',
                      'Observing: everything goes to the assistant; the center is only asked and its decision counted'),
          'off': ('Desligado: tudo vai ao assistente, sem consultar o centro', 'Off: everything goes to the assistant, the center is not asked')}
+REPEAT_NOTES = {  # why "Repetir o último" plays nothing: the code of briefing.ultimo_bom_dia / repetir_ultimo
+    'none': ('Ainda não há um Bom dia guardado para repetir.', 'There is no good morning saved to repeat yet.'),
+    'old': ('O último Bom dia tem mais de 20 horas e não é mais repetido.', 'The last good morning is over 20 hours old and is no longer repeated.'),
+    'missing': ('O áudio guardado não está mais na pasta de mídia do Home Assistant.', 'The saved audio is no longer in the Home Assistant media folder.'),
+    'speaker': ('Escolha o alto-falante e o motor de voz e salve antes.', 'Choose the speaker and the voice engine and save first.'),
+    'busy': ('Um Bom dia está falando agora. Tente de novo quando ele terminar.', 'A good morning is being spoken now. Try again when it ends.'),
+}
 FIELDS = {
     'sources': ('Fontes: de 1 a 20 linhas "Nome = endereço http(s)"', 'Sources: 1 to 20 lines "Name = http(s) address"'),
     'picks': ('Quantas por fonte: de 0 a 6', 'How many per source: 0 to 6'),
@@ -79,7 +87,7 @@ border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
 button,.button{font:inherit;font-weight:600;padding:8px 16px;border-radius:8px;min-height:44px;border:1px solid var(--accent);background:transparent;
 color:var(--accent);cursor:pointer;text-decoration:none;display:inline-flex;align-items:center}button.primary{background:var(--accent);color:var(--bg)}
-button.danger{border-color:var(--warn);color:var(--warn)}.note{padding:12px;border-radius:8px;border:1px solid var(--line);margin-bottom:16px}
+button:disabled{opacity:.5;cursor:default}button.danger{border-color:var(--warn);color:var(--warn)}.note{padding:12px;border-radius:8px;border:1px solid var(--line);margin-bottom:16px}
 .text{white-space:pre-wrap}.code{font-family:Consolas,monospace;font-size:20px;letter-spacing:4px}dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
 dt{color:var(--muted);font-size:13px}dd{margin:0;overflow-wrap:anywhere}
 """
@@ -265,6 +273,11 @@ def make_handler(app):
                 note = self.t('Falando o Bom dia no alto-falante escolhido.', 'Speaking the good morning on the chosen speaker.') if spoken else \
                     self.t('Escolha o alto-falante e o motor de voz e salve antes.', 'Choose the speaker and the voice engine and save first.')
                 return self.briefing_page(note=note, tone='ok' if spoken else 'warn')
+            if path == '/repetir':
+                answer = prefs.repeat_last()
+                note = self.t('Repetindo o último Bom dia no alto-falante escolhido.', 'Repeating the last good morning on the chosen speaker.') if answer == 'ok' else \
+                    self.t(*REPEAT_NOTES.get(answer, REPEAT_NOTES['none']))
+                return self.briefing_page(note=note, tone='ok' if answer == 'ok' else 'warn')
             return self.send(404, 'Not found', 'text/plain; charset=utf-8')
 
         # ---- Estado ----
@@ -353,6 +366,22 @@ def make_handler(app):
             return self.status_page(self.t('Sem contato com a plataforma: nada mudou. Tente de novo.', 'No contact with the platform: nothing changed. Try again.'), 'warn')
 
         # ---- Bom dia ----
+        def repeat_buttons(self):
+            """"Falar agora" and "Repetir o último" side by side; the second is off, with the reason under it, when there is nothing to
+            repeat (briefing.ultimo_bom_dia: none, old or missing), and says when the saved one was spoken when there is."""
+            state, last = briefing.ultimo_bom_dia()
+            if state == 'ok':
+                at = _hhmm(last.get('spoken_at'), app.center.time_zone or schedule.ha_time_zone())
+                note = self.t(f'Repetir toca o áudio guardado do Bom dia das {at}; a voz não é gerada de novo.',
+                              f'Repeat plays the saved audio of the {at} good morning; the voice is not generated again.')
+            else:
+                note = self.t(*REPEAT_NOTES[state])
+            return (f'<div class="actions"><form method="post" action="{_e(self.base())}/falar">{self.token_field()}'
+                    f'<button type="submit">{self.t("Falar agora", "Speak now")}</button></form>'
+                    f'<form method="post" action="{_e(self.base())}/repetir">{self.token_field()}'
+                    f'<button type="submit"{"" if state == "ok" else " disabled"}>{self.t("Repetir o último", "Repeat the last one")}</button></form></div>'
+                    f'<p class="muted">{_e(note)}</p>')
+
         def briefing_page(self, values=None, note='', tone='', text=None, status=200):
             version, current, saved_at = prefs.load()
             p = values or current
@@ -413,8 +442,7 @@ def make_handler(app):
                     f'<label>{self.t("Dias (nenhum = desligada)", "Days (none = off)")}</label><div class="days">{days}</div></section>'
                     f'<div class="actions"><button class="primary" type="submit" name="action" value="save">{self.t("Salvar", "Save")}</button>'
                     f'<button type="submit" name="action" value="test">{self.t("Testar", "Test")}</button></div></form>'
-                    f'<form method="post" action="{_e(self.base())}/falar">{self.token_field()}<div class="actions">'
-                    f'<button type="submit">{self.t("Falar agora", "Speak now")}</button></div></form>')
+                    + self.repeat_buttons())
             return self.page(self.t('Bom dia', 'Good morning'), 'bomdia', body, status)
 
         def briefing_post(self, form):

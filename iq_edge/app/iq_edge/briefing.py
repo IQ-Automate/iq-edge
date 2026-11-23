@@ -107,10 +107,18 @@ evento `iq_bom_dia_done` {spoken, language}, para uma automacao esperar a fala a
 depois da chamada de voz, de o volume voltar e do tempo estimado da fala, contado do comeco dela (o Sonos responde antes
 do fim); sem fala nenhuma (sem alto-falante nem satelite, HA fora, falha na voz, alto-falante ocupado), sai na hora com
 spoken false. Um evento por Bom dia. O pedido de voz (que devolve o texto ao aparelho de voz) nao avisa.
+
+REPETIR O ULTIMO (0.2.6): depois que um Bom dia e falado pelo alto-falante (tts.speak), o add-on guarda o AUDIO do que foi falado
+(guardar_ultimo: o mesmo pedido do precache_tts ao HA, que responde do cache dele) em <pasta de midia>/iq-edge/bom-dia.mp3, mais
+/data/briefing-last.json {language, speaker, volume, spoken_at, size, sha256, extension, seconds}: nunca o texto. repetir_ultimo
+toca esse arquivo com media_player.play_media (announce) e NUNCA chama a voz (tts.speak, tts_get_url, satelite): repetir nao gasta
+a ElevenLabs. Vale por 20 horas e so guarda o ultimo; qualquer falha ao guardar apaga o anterior (repetir nunca toca um Bom dia
+mais velho). Disparos: evento `iq_bom_dia_repeat` (events.py) e o botao da aba (web.py, POST /repetir). Nao avisa `iq_bom_dia_done`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
@@ -122,7 +130,8 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -1478,6 +1487,7 @@ def speak_on_speaker(fala: str, idioma: str, cfg: dict[str, Any]) -> bool:
             if tentativa + 1 < tentativas:
                 logger.info("Resumo: a voz padrao falhou; tentando de novo sem a opcao de voz.")
                 corpo = {k: v for k, v in corpo.items() if k != "options"}
+                cfg["sem_voz"] = True  # o audio que sera guardado para repetir e o desta fala: sem a opcao de voz (_corpo_tts_url)
     return False
 
 
@@ -1579,6 +1589,8 @@ def _entregar_no_alto_falante(
     wait_fn: Callable[[str, float], None] | None = None,
     done_fn: Callable[[bool, str], Any] | None = None,
     clock_fn: Callable[[], float] | None = None,
+    guardar_fn: Callable[[str, str, dict[str, Any]], Any] | None = None,
+    duracao: float | None = None,
 ) -> None:
     """Espera o aparelho de voz terminar o "Um instante." e toca o resumo. Se
     nao der, cai na reserva (satelite) em vez de ficar em silencio.
@@ -1587,7 +1599,11 @@ def _entregar_no_alto_falante(
     que estava -- mas so se ninguem mexeu no volume durante a fala, e nunca se o
     volume anterior nao pode ser lido (melhor nao mexer do que deixar errado).
 
-    `done_fn` (so no Bom dia automatico): no fim, depois da voz e do volume, avisa o HA uma vez (_avisar_fim)."""
+    `done_fn` (so no Bom dia automatico): no fim, depois da voz e do volume, avisa o HA uma vez (_avisar_fim).
+
+    `guardar_fn` (so o Bom dia; 0.2.6): depois de tudo isso, guarda o audio do que foi falado para repetir (guardar_ultimo);
+    se a fala saiu so pelo satelite, o audio guardado de antes e apagado (repetir nunca toca um Bom dia mais velho).
+    `duracao` (so a repeticao): quanto esperar antes de devolver o volume, no lugar da estimada pelo texto."""
     relogio = clock_fn or time.monotonic
     sleep_fn(cfg["atraso"])
     get_volume = get_volume_fn or get_speaker_volume
@@ -1613,7 +1629,7 @@ def _entregar_no_alto_falante(
     if anterior is not None:
         try:
             if ok:
-                (wait_fn or wait_speaker_idle)(cfg["speaker"], _estimar_duracao(fala))
+                (wait_fn or wait_speaker_idle)(cfg["speaker"], _estimar_duracao(fala) if duracao is None else duracao)
             atual = get_volume(cfg["speaker"])
             if atual is not None and abs(atual - alvo) < 0.02:
                 set_volume(cfg["speaker"], anterior)
@@ -1626,6 +1642,8 @@ def _entregar_no_alto_falante(
         except Exception:
             logger.warning("Resumo: erro na reserva do satelite.", exc_info=True)
     _avisar_fim(done_fn, idioma, falou, fala, inicio, sleep_fn, relogio)
+    if guardar_fn is not None:
+        _guardar_depois(guardar_fn, ok, falou, fala, idioma, cfg)
 
 
 def _anunciar_no_satelite(
@@ -1643,6 +1661,8 @@ def _anunciar_no_satelite(
         falou = bool(announce_fn(fala, satelite))
     finally:
         _avisar_fim(done_fn, idioma, falou, fala, inicio, sleep_fn, clock_fn)
+    if falou:
+        esquecer_ultimo()  # este Bom dia nao tem audio guardado: repetir nunca toca um mais velho
 
 
 def _avisar_fim(
@@ -1776,21 +1796,35 @@ def preparar(
     return pronto, prefixo_da_hora(dados, idioma)
 
 
+def _corpo_tts_url(fala: str, idioma: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """O corpo do POST /api/tts_get_url: o mesmo motor, mensagem, idioma e voz de speak_on_speaker. UM so lugar para o
+    adiantamento do audio (precache_tts) e para o audio guardado para repetir (baixar_audio_da_fala): nunca diferem. Se a fala
+    saiu sem a opcao de voz (speak_on_speaker tentou de novo sem ela e marcou `sem_voz`), o corpo tambem sai sem ela."""
+    corpo: dict[str, Any] = {"engine_id": cfg["engine"], "message": fala, "language": idioma}
+    voz = cfg["voz_en"] if idioma == "en" else cfg["voz_pt"]
+    if voz and not cfg.get("sem_voz"):
+        corpo["options"] = {"voice": voz}
+    return corpo
+
+
+def _caminho_do_audio(fala: str, idioma: str, cfg: dict[str, Any]) -> str:
+    """POST /api/tts_get_url: o caminho (/api/tts_proxy/...) do audio desta fala no HA, ou "" se a resposta nao trouxe um.
+    Erros de rede ou de formato sobem (requests.RequestException, ValueError, AttributeError)."""
+    resposta = requests.post(f"{HA_URL}/api/tts_get_url", headers=_ha_headers(), json=_corpo_tts_url(fala, idioma, cfg), timeout=60)
+    resposta.raise_for_status()
+    caminho = str((resposta.json() or {}).get("path") or "")
+    return caminho if caminho.startswith("/api/tts_proxy/") else ""
+
+
 def precache_tts(fala: str, idioma: str, cfg: dict[str, Any]) -> bool:
     """Melhor esforco: pede ao HA para gerar e guardar em cache o audio desta fala (POST /api/tts_get_url com o mesmo motor,
     mensagem, idioma e voz de speak_on_speaker) e baixa o audio uma vez, para o tts.speak da hora sair do cache. Nada toca
     agora. Endpoint ausente ou erro: ignorado (a voz e gerada na hora, como antes)."""
     if not HA_URL or not HA_TOKEN or not fala:
         return False
-    corpo: dict[str, Any] = {"engine_id": cfg["engine"], "message": fala, "language": idioma}
-    voz = cfg["voz_en"] if idioma == "en" else cfg["voz_pt"]
-    if voz:
-        corpo["options"] = {"voice": voz}
     try:
-        resposta = requests.post(f"{HA_URL}/api/tts_get_url", headers=_ha_headers(), json=corpo, timeout=60)
-        resposta.raise_for_status()
-        caminho = str((resposta.json() or {}).get("path") or "")
-        if caminho.startswith("/api/tts_proxy/"):
+        caminho = _caminho_do_audio(fala, idioma, cfg)
+        if caminho:
             with requests.get(f"{HA_URL}{caminho}", headers=_ha_headers(), timeout=60, stream=True) as audio:
                 audio.raise_for_status()
                 for _ in audio.iter_content(65536):
@@ -1799,6 +1833,255 @@ def precache_tts(fala: str, idioma: str, cfg: dict[str, Any]) -> bool:
     except (requests.RequestException, ValueError, AttributeError):
         logger.info("Bom dia: o Home Assistant nao adiantou o audio da voz (ele sera gerado na hora).")
         return False
+
+
+# --------------------------------------------------------------------------
+# Repetir o ultimo Bom dia (0.2.6): o audio do que foi falado fica guardado, e repetir so toca esse arquivo
+# --------------------------------------------------------------------------
+
+REPETIR_HORAS = 20  # o audio guardado so vale por isto
+_EXTENSOES_DO_AUDIO = ("mp3", "wav", "ogg", "flac")
+_LIMITE_AUDIO = 25_000_000  # bytes: um Bom dia tem menos de 2 MB; isto so protege o disco
+_DEMORA_DE_CACHE = 2.5  # segundos: acima disto o HA provavelmente gerou a voz de novo em vez de responder do cache
+_PASTA_DE_MIDIA = "iq-edge"  # dentro da pasta de midia do HA: media-source://media_source/local/iq-edge/bom-dia.<ext>
+_FALA_LOCK = threading.Lock()
+_FALANDO = [0]  # entregas no alto-falante em curso (o Bom dia e a repeticao): repetir nao toca por cima de uma fala
+
+
+def _arquivo_do_ultimo() -> Path:
+    return settings.data_dir() / "briefing-last.json"
+
+
+def _pasta_do_audio() -> Path:
+    return settings.media_dir() / _PASTA_DE_MIDIA
+
+
+def esquecer_ultimo() -> None:
+    """Apaga o audio guardado e o seu arquivo de dados (o json primeiro: sem ele, repetir diz que nao ha nada)."""
+    for caminho in (_arquivo_do_ultimo(), *(_pasta_do_audio() / f"bom-dia.{e}" for e in _EXTENSOES_DO_AUDIO)):
+        try:
+            caminho.unlink()
+        except OSError:
+            pass
+
+
+def baixar_audio_da_fala(fala: str, idioma: str, cfg: dict[str, Any]) -> tuple[bytes, str] | None:
+    """O audio desta fala como o HA o tem (POST /api/tts_get_url com o MESMO corpo de precache_tts + o download): (bytes,
+    extensao) ou None. Chamado depois do tts.speak, o HA responde do cache dele: a voz nao e gerada de novo."""
+    if not HA_URL or not HA_TOKEN or not fala:
+        return None
+    try:
+        inicio = time.monotonic()
+        caminho = _caminho_do_audio(fala, idioma, cfg)
+        demora = time.monotonic() - inicio
+        # A prova, no registro, de que a voz nao foi gerada de novo: do cache o HA responde na hora; gerar leva segundos.
+        if demora > _DEMORA_DE_CACHE:
+            logger.warning("Bom dia: o Home Assistant levou %.1f s para devolver o audio da fala; a voz pode ter sido gerada de novo.", demora)
+        else:
+            logger.info("Bom dia: o Home Assistant devolveu o audio da fala em %.1f s (veio do que ele ja tinha guardado).", demora)
+        if not caminho:
+            return None
+        pedacos, total = [], 0
+        with requests.get(f"{HA_URL}{caminho}", headers=_ha_headers(), timeout=60, stream=True) as audio:
+            audio.raise_for_status()
+            for pedaco in audio.iter_content(65536):
+                total += len(pedaco)
+                if total > _LIMITE_AUDIO:
+                    return None
+                pedacos.append(pedaco)
+    except (requests.RequestException, ValueError, AttributeError):
+        return None
+    extensao = caminho.rsplit(".", 1)[-1].lower()
+    return (b"".join(pedacos), extensao if extensao in _EXTENSOES_DO_AUDIO else "mp3") if total else None
+
+
+def guardar_ultimo(
+    fala: str,
+    idioma: str,
+    cfg: dict[str, Any],
+    *,
+    baixar_fn: Callable[[str, str, dict[str, Any]], tuple[bytes, str] | None] | None = None,
+    agora_fn: Callable[[], datetime] | None = None,
+) -> bool:
+    """Depois de o Bom dia ser falado pelo alto-falante: guarda o AUDIO do que foi falado em <midia>/iq-edge/bom-dia.<ext> e os
+    dados em /data/briefing-last.json (modo 600): {language, speaker, volume, spoken_at, size, sha256, extension, seconds}. Nunca o
+    texto da fala. O anterior e apagado ANTES: qualquer falha deixa so uma linha no registro e nada guardado, para repetir nunca
+    tocar um Bom dia mais velho. A pasta de midia nao e criada (sem o mapeamento `media`, repetir fica desligado)."""
+    esquecer_ultimo()
+    try:
+        if not settings.media_dir().is_dir():
+            raise OSError("sem pasta de midia")
+        audio = (baixar_fn or baixar_audio_da_fala)(fala, idioma, cfg)
+        if not audio or not audio[0]:
+            raise ValueError("sem audio")
+        dados, extensao = audio
+        pasta = _pasta_do_audio()
+        pasta.mkdir(exist_ok=True)
+        destino = pasta / f"bom-dia.{extensao}"
+        temporario = pasta / f".bom-dia.{os.urandom(4).hex()}.tmp"
+        try:
+            descritor = os.open(temporario, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            with os.fdopen(descritor, "wb") as arquivo:
+                arquivo.write(dados)
+                arquivo.flush()
+                os.fsync(arquivo.fileno())
+            os.replace(temporario, destino)
+        finally:
+            try:
+                temporario.unlink()
+            except OSError:
+                pass
+        agora = (agora_fn or (lambda: datetime.now(timezone.utc)))()
+        settings.write_json(_arquivo_do_ultimo(), {
+            "language": idioma,
+            "speaker": cfg["speaker"],
+            "volume": cfg.get("volume"),
+            "spoken_at": agora.astimezone(timezone.utc).isoformat(timespec="seconds"),
+            "size": len(dados),
+            "sha256": hashlib.sha256(dados).hexdigest(),
+            "extension": extensao,
+            "seconds": round(_estimar_duracao(fala), 1),  # so um numero: o texto nunca e guardado
+        })
+        return True
+    except Exception:
+        logger.info("Bom dia: nao consegui guardar o audio para repetir (repetir fica indisponivel ate o proximo Bom dia).")
+        esquecer_ultimo()
+        return False
+
+
+def _guardar_depois(
+    guardar_fn: Callable[[str, str, dict[str, Any]], Any], ok: bool, falou: bool, fala: str, idioma: str, cfg: dict[str, Any]
+) -> None:
+    """O fim de _entregar_no_alto_falante: guarda o audio da fala que tocou no alto-falante; se so o satelite falou, apaga o
+    guardado de antes. Um erro aqui vira so um aviso (nunca derruba o Bom dia)."""
+    try:
+        if ok:
+            guardar_fn(fala, idioma, cfg)
+        elif falou:
+            esquecer_ultimo()
+    except Exception:
+        logger.warning("Bom dia: erro ao guardar o audio para repetir.", exc_info=True)
+
+
+def ultimo_bom_dia(agora: datetime | None = None) -> tuple[str, dict[str, Any]]:
+    """O Bom dia guardado e se ainda da para repetir: ("ok", dados) ou (motivo, {}) com motivo `none` (nada guardado),
+    `old` (mais de REPETIR_HORAS) ou `missing` (o arquivo de audio sumiu, mudou de tamanho ou de conteudo)."""
+    dados = settings.read_json(_arquivo_do_ultimo(), None)
+    momento = settings.parse_time(dados.get("spoken_at")) if isinstance(dados, dict) else None
+    if momento is None:
+        return "none", {}
+    idade = (agora or datetime.now(timezone.utc)) - momento
+    if not -timedelta(minutes=5) <= idade < timedelta(hours=REPETIR_HORAS):
+        return "old", {}
+    extensao = dados.get("extension")
+    try:
+        conteudo = (_pasta_do_audio() / f"bom-dia.{extensao}").read_bytes() if extensao in _EXTENSOES_DO_AUDIO else b""
+    except OSError:
+        conteudo = b""
+    if not conteudo or len(conteudo) != dados.get("size") or hashlib.sha256(conteudo).hexdigest() != dados.get("sha256"):
+        return "missing", {}
+    return "ok", dados
+
+
+def tocar_audio_guardado(cfg: dict[str, Any], extensao: str, duracao: float) -> bool:
+    """media_player.play_media do HA com o arquivo guardado (announce: o Sonos volta ao que tocava). Nao toca a voz: o audio ja
+    existe. True se o HA aceitou; o servico so volta depois do audio, por isso o limite da espera."""
+    if not HA_URL or not HA_TOKEN:
+        return False
+    corpo = {
+        "entity_id": cfg["speaker"],
+        "media_content_id": f"media-source://media_source/local/{_PASTA_DE_MIDIA}/bom-dia.{extensao}",
+        "media_content_type": "music",
+        "announce": True,
+    }
+    try:
+        resposta = requests.post(
+            f"{HA_URL}/api/services/media_player/play_media",
+            headers=_ha_headers(),
+            json=corpo,
+            timeout=(10, min(240.0, duracao + 30.0)),
+        )
+        resposta.raise_for_status()
+        return True
+    except requests.Timeout:
+        logger.warning("Repetir: o HA nao respondeu a tempo ao play_media (o audio pode ter sido tocado mesmo assim).")
+        return False
+    except requests.RequestException:
+        logger.warning("Repetir: nao consegui tocar o audio guardado no alto-falante.", exc_info=True)
+        return False
+
+
+def _contar_fala(tarefa: Callable[[], None]) -> Callable[[], None]:
+    """A entrega no alto-falante (Bom dia ou satelite) conta como "falando" enquanto roda: repetir espera (devolve `busy`)."""
+
+    def rodar() -> None:
+        contador = _FALANDO  # o contador em uso quando esta entrega comecou: quem soma e quem tira e sempre o mesmo
+        with _FALA_LOCK:
+            contador[0] += 1
+        try:
+            tarefa()
+        finally:
+            with _FALA_LOCK:
+                contador[0] -= 1
+
+    return rodar
+
+
+def repetir_ultimo(
+    *,
+    agora: datetime | None = None,
+    play_fn: Callable[[dict[str, Any], str, float], bool] | None = None,
+    spawn_fn: Callable[[Callable[[], None]], None] | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+    get_volume_fn: Callable[[str], float | None] | None = None,
+    set_volume_fn: Callable[[str, float], bool] | None = None,
+    wait_fn: Callable[[str, float], None] | None = None,
+) -> str:
+    """Toca de novo, no alto-falante CONFIGURADO AGORA, o audio guardado do ultimo Bom dia (o mesmo arquivo, os mesmos bytes), em
+    segundo plano e com a mesma regra de volume da fala. NUNCA chama a voz: nem tts.speak, nem tts_get_url, nem o satelite; nao
+    avisa iq_bom_dia_done. Devolve `ok` (tocando) ou o motivo de nao tocar: `none`, `old`, `missing` (ultimo_bom_dia), `speaker`
+    (sem alto-falante e motor de voz configurados) ou `busy` (um Bom dia ou uma repeticao esta falando agora)."""
+    estado, ultimo = ultimo_bom_dia(agora)
+    if estado != "ok":
+        return estado
+    cfg = speaker_config()
+    if cfg is None:
+        return "speaker"
+    contador = _FALANDO
+    with _FALA_LOCK:
+        if contador[0]:
+            return "busy"
+        contador[0] += 1  # reservado ja: duas repeticoes ao mesmo tempo tocam uma so
+    extensao = str(ultimo["extension"])
+    duracao = float(ultimo["seconds"]) if isinstance(ultimo.get("seconds"), (int, float)) else ultimo["size"] / 4000 + 4.0
+    tocar = play_fn or tocar_audio_guardado
+    cfg = {**cfg, "atraso": 0.0, "satellite": ""}  # sem espera do "Um instante." e sem reserva: sem texto, o satelite nao fala
+
+    def tarefa() -> None:
+        try:
+            _entregar_no_alto_falante(
+                "",
+                str(ultimo.get("language") or "pt"),
+                cfg,
+                lambda fala, idioma, c: bool(tocar(c, extensao, duracao)),
+                lambda fala, satelite: False,
+                sleep_fn or time.sleep,
+                get_volume_fn,
+                set_volume_fn,
+                wait_fn,
+                duracao=duracao,
+            )
+        finally:
+            with _FALA_LOCK:
+                contador[0] -= 1
+
+    try:
+        (spawn_fn or (lambda f: threading.Thread(target=f, daemon=True).start()))(tarefa)
+    except BaseException:
+        with _FALA_LOCK:
+            contador[0] -= 1
+        raise
+    return "ok"
 
 
 def preview(
@@ -1848,6 +2131,7 @@ def handle(
     done_fn: Callable[[bool, str], Any] | None = None,
     clock_fn: Callable[[], float] | None = None,
     agora_fn: Callable[[Any], datetime] | None = None,
+    guardar_fn: Callable[[str, str, dict[str, Any]], Any] | None = None,
 ) -> str | None:
     """Se `texto` pede o resumo, devolve a fala (e publica os cartoes no
     painel). Se nao pede, devolve None e quem chamou segue o fluxo normal.
@@ -1856,7 +2140,9 @@ def handle(
     com os estados de agora) + o texto pronto, sem RSS nem IA; idioma diferente = compoe na hora.
     `done_fn` (padrao publish_done) e `clock_fn` (padrao time.monotonic): so o pedido automatico avisa o HA, com o evento
     iq_bom_dia_done, quando a fala termina (ou na hora, com spoken false, se nada for falado); o pedido de voz nao.
-    `agora_fn(fuso)` (padrao datetime.now): o instante que diz o dia da semana do lembrete do lixo (so os testes trocam)."""
+    `agora_fn(fuso)` (padrao datetime.now): o instante que diz o dia da semana do lembrete do lixo (so os testes trocam).
+    `guardar_fn` (padrao guardar_ultimo, 0.2.6): chamado no fim da fala pelo alto-falante, depois do aviso de fim e do volume,
+    para guardar o audio que o botao "Repetir o ultimo" toca (so os testes trocam)."""
     idioma = detect_briefing(texto)
     if idioma is None:
         return None
@@ -1940,8 +2226,9 @@ def handle(
             wait_fn,
             fim,
             relogio,
+            guardar_fn=guardar_fn or guardar_ultimo,
         )
-        (spawn_fn or (lambda f: threading.Thread(target=f, daemon=True).start()))(tarefa)
+        (spawn_fn or (lambda f: threading.Thread(target=f, daemon=True).start()))(_contar_fala(tarefa))
         return _T[idioma]["ack"]
     if automatico:
         # Sem aparelho de voz ligado ao pedido, devolver o texto nao fala nada:
@@ -1950,7 +2237,7 @@ def handle(
         if satelite:
             anunciar = announce_fn or announce_on_satellite
             tarefa = lambda: _anunciar_no_satelite(fala, idioma, satelite, anunciar, fim, sono, relogio)  # noqa: E731
-            (spawn_fn or (lambda f: threading.Thread(target=f, daemon=True).start()))(tarefa)
+            (spawn_fn or (lambda f: threading.Thread(target=f, daemon=True).start()))(_contar_fala(tarefa))
         else:
             _avisar_fim(fim, idioma)  # nada a falar (sem alto-falante nem satelite, ou ocupado): na hora, com spoken false
         return _T[idioma]["ack"]

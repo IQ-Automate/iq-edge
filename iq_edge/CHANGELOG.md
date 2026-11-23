@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.6
+
+- Botão novo **Repetir o último**, na aba **Bom dia**, ao lado de **Falar agora**: toca de novo o Bom dia que acabou de ser
+  falado (por exemplo, para ouvir as notícias do dia outra vez). É o **mesmo áudio**: o add-on não gera a voz de novo e, por isso,
+  a repetição **não gasta** a ElevenLabs.
+- Evento novo `iq_bom_dia_repeat`: uma automação ou um script do Home Assistant dispara a mesma repetição (`- event:
+  iq_bom_dia_repeat`). Dois eventos com menos de 1 minuto de diferença tocam uma vez só. O pedido é ignorado enquanto um Bom dia
+  está falando. A repetição não dispara `iq_bom_dia_done`.
+- Depois de cada Bom dia falado no alto-falante, o add-on guarda o áudio do que foi falado na pasta de mídia do Home Assistant
+  (`iq-edge/bom-dia.mp3`) e os dados em `/data/briefing-last.json` (só o add-on lê): idioma, alto-falante, volume, hora, tamanho,
+  um resumo do arquivo e a duração estimada. **O texto da fala não é guardado.** O áudio vem do próprio Home Assistant, com o mesmo
+  pedido que o Bom dia preparado já usa, depois que a fala terminou: ele responde do cache dele.
+- Só o último Bom dia fica guardado, por 20 horas. Se guardar o áudio de hoje falhar, o de antes é apagado: a repetição nunca toca
+  um Bom dia mais velho. O mesmo vale quando o Bom dia saiu só pelo aparelho de voz de reserva.
+- A repetição usa `media_player.play_media` (com `announce`) no alto-falante escolhido **agora**, com o volume do Bom dia (depois o
+  volume volta). Nunca chama `tts.speak`, `tts_get_url` nem o aparelho de voz. Quando não há o que repetir (nada guardado, mais de 20
+  horas, arquivo sumido) ou um Bom dia está falando, nada toca. Sem áudio para repetir, a aba deixa o botão desligado e diz o
+  motivo.
+- O add-on ganha acesso de leitura e escrita à pasta de mídia (`map: media:rw`). Só a pasta `iq-edge` dentro dela é usada.
+- **O que muda ao atualizar:** nada no Bom dia: mesma fala, mesmos eventos, mesmo horário. A repetição só passa a existir depois do
+  primeiro Bom dia falado na 0.2.6.
+
 ## 0.2.5
 
 - Roteador de voz (lote J1b): o add-on recebe os pedidos do assistente de voz da casa (pela integração Webhook Conversation),

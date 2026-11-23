@@ -1,5 +1,6 @@
 """The add-on's package as the Supervisor reads it: config.yaml (the same version as the code, ingress on 8099, Core API only, the
-voice router's port 8098 not published on the host, amd64 + aarch64, the options), the Dockerfile (a fixed base image tag, no build.yaml), repository.yaml and the files a person sees."""
+voice router's port 8098 not published on the host, amd64 + aarch64, the options), the Dockerfile (a fixed base image tag, no build.yaml), repository.yaml and the files a person sees. 0.2.6: the media folder is
+mapped (read and write) for the audio of the last Bom dia."""
 import os
 import re
 import unittest
@@ -26,6 +27,9 @@ class PackageTests(unittest.TestCase):
         self.assertTrue(config['homeassistant_api'])
         for key in ('hassio_api', 'host_network', 'privileged', 'full_access', 'docker_api'):
             self.assertNotIn(key, config)  # nothing more than the Core API
+        # 0.2.6: only Home Assistant's media folder is mapped (the last Bom dia's audio, in iq-edge/), read and write, nothing else
+        self.assertEqual(config['map'], ['media:rw'])
+        self.assertEqual(settings.media_dir().as_posix(), '/media')
         # 0.2.5: the voice router's port for Home Assistant Core, on the internal network; null = NOT published on the host by default
         self.assertEqual(config['ports'], {'8098/tcp': None})
         self.assertEqual(settings.voice_port(), 8098)
@@ -68,7 +72,7 @@ class PackageTests(unittest.TestCase):
         """0.2.5 (lote J1b): voice_agent_url, voice_agent_user and voice_agent_password are optional (out of `options`), have the schema types
         the Supervisor reads, sit in the options-to-environment map, in both translations and in the docs; no new version number."""
         config = yaml.safe_load((ADDON / 'config.yaml').read_text(encoding='utf-8'))
-        self.assertEqual(config['version'], '0.2.5')
+        self.assertEqual(config['version'], iq_edge.__version__)
         self.assertEqual(config['schema']['voice_agent_url'], 'url?')
         self.assertEqual(config['schema']['voice_agent_user'], 'str(0,200)?')
         self.assertEqual(config['schema']['voice_agent_password'], 'password?')  # the Supervisor hides it in the options form
@@ -89,7 +93,7 @@ class PackageTests(unittest.TestCase):
         changelog = (ADDON / 'CHANGELOG.md').read_text(encoding='utf-8')
         entry = changelog[changelog.index('## 0.2.5'):changelog.index('## 0.2.4')]
         self.assertEqual(changelog.count('## 0.2.5'), 1)
-        self.assertFalse(re.search(r'^## 0\.2\.[6-9]|^## 0\.[3-9]', changelog, re.M))  # the 0.2.5 entry grows; no new version
+        self.assertEqual(re.findall(r'^## (\d+\.\d+\.\d+)$', changelog, re.M)[:2], ['0.2.6', '0.2.5'])  # 0.2.6 (the repeat) sits on top of it
         for option in ('voice_agent', 'voice_route', *env):
             self.assertIn(f'`{option}`', docs, option)
             self.assertIn(f'`{option}`', entry, option)

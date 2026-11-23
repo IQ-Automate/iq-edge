@@ -15,6 +15,7 @@ você edita.
   (nomes de quem está em casa, clima, o que está aberto, alarme e as manchetes candidatas). Sem plataforma ou sem resposta, o
   texto é montado por regra, como antes.
 - Prepara o Bom dia antes do horário, para a fala sair na hora.
+- Repete o último Bom dia (0.2.6) com o mesmo áudio, sem gerar a voz de novo. Veja **Repetir o último Bom dia**.
 - Roteia a voz do assistente da casa (0.2.5): recebe os pedidos do assistente de voz, pergunta à plataforma para onde cada
   um vai e manda ao assistente local do Home Assistant ou ao assistente que a casa já usava. Só liga quando você escolhe esse
   assistente (`voice_agent_url` ou `voice_agent`). Veja **Roteador de voz**.
@@ -62,6 +63,7 @@ Botões:
 - **Salvar** guarda nesta casa e envia à plataforma. Sem internet, a plataforma recebe quando a conexão voltar.
 - **Falar agora** fala o Bom dia salvo no alto-falante escolhido. Sem alto-falante, fala no aparelho de voz de reserva (opção
   `satellite`).
+- **Repetir o último** toca de novo o áudio do último Bom dia falado (0.2.6). Veja **Repetir o último Bom dia**.
 
 ### Bom dia preparado antes
 
@@ -131,6 +133,35 @@ estimado da fala. Use o evento para começar a música ambiente só depois da fa
       event_type: iq_bom_dia_done
   timeout: "00:03:00"
   continue_on_timeout: true
+```
+
+## Repetir o último Bom dia (0.2.6)
+
+Para ouvir o Bom dia de novo (por exemplo, as notícias do dia), use o botão **Repetir o último**, ao lado de **Falar agora**, na aba
+**IQ** → **Bom dia**. Ou dispare o evento `iq_bom_dia_repeat` numa automação ou num script.
+
+- A repetição toca o **mesmo áudio** que foi falado. O add-on **não gera a voz de novo**. Por isso a repetição **não gasta** a
+  ElevenLabs.
+- Depois de cada Bom dia falado no alto-falante, o add-on guarda o áudio na pasta de mídia do Home Assistant, no arquivo
+  `iq-edge/bom-dia.mp3`. Para ver o arquivo, abra **Mídia** no Home Assistant e procure a pasta `iq-edge` nas suas mídias locais.
+- O add-on guarda só o **último** Bom dia, por **20 horas**. Um Bom dia novo troca o anterior. O texto da fala não é guardado,
+  só o áudio.
+- A repetição fala no alto-falante escolhido agora e no volume do Bom dia. Depois o volume volta ao que era. Ela não dispara o
+  evento `iq_bom_dia_done`.
+- Nada toca quando não há Bom dia guardado, quando ele tem mais de 20 horas, quando o arquivo sumiu ou quando um Bom dia está
+  falando. Sem áudio para repetir, a aba **Bom dia** deixa o botão desligado e diz o motivo. O evento só escreve o motivo no
+  registro do add-on.
+- Se um Bom dia saiu só pelo aparelho de voz de reserva (`satellite`), não há áudio para guardar. O áudio de antes é apagado, para
+  a repetição nunca tocar um Bom dia mais velho.
+- Dois eventos `iq_bom_dia_repeat` com menos de 1 minuto de diferença tocam uma vez só.
+- Depois de atualizar para a 0.2.6, o primeiro Bom dia falado guarda o primeiro áudio. Até lá, o botão fica desligado.
+
+Exemplo de script para disparar a repetição (por exemplo, por um botão do painel):
+
+```yaml
+alias: Repetir o Bom dia
+sequence:
+  - event: iq_bom_dia_repeat
 ```
 
 ## Opções do Bom dia (aba Configuração do add-on)
@@ -262,6 +293,9 @@ endereço). Nunca mostra o texto de um pedido.
 - **"Sem contato com a plataforma"**: confira a internet da casa. O add-on tenta de novo sozinho.
 - **"A plataforma desconectou esta casa"**: a casa foi despareada. Peça um código novo.
 - **Falar agora não fala**: escolha o alto-falante e o motor de voz e toque em **Salvar** antes.
+- **Repetir o último está desligado**: ainda não houve um Bom dia falado no alto-falante desde a atualização, ou o último tem mais de
+  20 horas. Toque em **Falar agora** e, depois da fala, o botão liga. Se a aba diz que o áudio não está mais na pasta de mídia,
+  confira se alguém apagou a pasta `iq-edge` e se o add-on está na versão 0.2.6 ou mais nova.
 - **"IA pelo centro: sem resposta"** na aba **Estado**: o Bom dia saiu com o texto por regra. Confira a internet da casa e o
   pareamento. A plataforma aceita 6 pedidos por hora e 30 por dia de cada casa.
 - **"Evento iq_bom_dia: sem conexão com o Home Assistant"**: o add-on tenta de novo sozinho. Se continuar, reinicie o add-on.
@@ -332,6 +366,14 @@ morning ends with a fixed reminder to take the trash out (in the home's time zon
 plays over the TV or music (`speaker_busy: interrupt`), says only "Good morning." with no names (in the speech, on the Home card
 or in the request to the platform), and, with ElevenLabs, uses the IQ voice. `speaker_busy: voice`, `greet_names: true` and a
 voice id in `tts_voice` bring back the old behavior.
+
+Since 0.2.6 the add-on keeps the audio of the last good morning it spoke on the speaker (in Home Assistant's media folder, file
+`iq-edge/bom-dia.mp3`, for 20 hours; never the text) and can play it again with the button **Repeat the last one** (next to **Speak now**)
+or with the event `iq_bom_dia_repeat` (an automation or script step `- event: iq_bom_dia_repeat`). The repeat plays that same file with
+`media_player.play_media` and never asks the voice engine for anything, so it costs nothing on ElevenLabs. It plays on the speaker chosen now,
+at the good morning volume, and does not fire `iq_bom_dia_done`. It plays nothing when no good morning is saved, when the saved one is
+over 20 hours old, when the file is gone or while a good morning is being spoken (the tab says why). Two repeat events less than a minute
+apart play once.
 
 Since 0.2.5 the add-on is also a voice router. It runs only when `voice_agent` (an entity) or `voice_agent_url` (an address) is set;
 with every voice option empty, or with only `voice_route`, the add-on is what 0.2.4 was (no listener, no new file), and the
