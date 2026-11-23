@@ -4,7 +4,7 @@ Repositório de apps (add-ons) da IQ Autom8 para o Home Assistant OS / Supervise
 
 | App | O que faz |
 | --- | --- |
-| [IQ Edge](iq_edge/) | Conecta a casa à plataforma IQ (pareamento por código, sem Nabu Casa), traz o Bom dia editável na aba IQ e um roteador da voz do assistente (porta 8098, só na rede interna). |
+| [IQ Edge](iq_edge/) | Conecta a casa à plataforma IQ (pareamento por código, sem Nabu Casa), traz o Bom dia editável na aba IQ e um roteador da voz do assistente (porta 8098, só na rede interna e só quando um assistente está escolhido nas opções). |
 
 ## Instalar
 
