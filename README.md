@@ -4,7 +4,7 @@ Repositório de apps (add-ons) da IQ Autom8 para o Home Assistant OS / Supervise
 
 | App | O que faz |
 | --- | --- |
-| [IQ Edge](iq_edge/) | Conecta a casa à plataforma IQ (pareamento por código, sem Nabu Casa) e traz o Bom dia editável na aba IQ. |
+| [IQ Edge](iq_edge/) | Conecta a casa à plataforma IQ (pareamento por código, sem Nabu Casa), traz o Bom dia editável na aba IQ e um roteador da voz do assistente (porta 8098, só na rede interna). |
 
 ## Instalar
 
@@ -19,7 +19,7 @@ Depois instale **IQ Edge** e siga a aba **Documentação** do app.
 ## Desenvolvimento
 
 O pacote Python fica em `iq_edge/app/iq_edge` (só `requests`, `PyYAML` e a biblioteca padrão). Ele roda fora do Home Assistant com
-variáveis de ambiente (`HA_URL`, `HA_TOKEN`, `IQ_CENTER_URL`, `IQ_DATA_DIR`, `IQ_PAIRING_CODE`, `IQ_HA_WS_URL`). Testes, com
+variáveis de ambiente (`HA_URL`, `HA_TOKEN`, `IQ_CENTER_URL`, `IQ_DATA_DIR`, `IQ_PAIRING_CODE`, `IQ_HA_WS_URL`, `IQ_VOICE_PORT`). Testes, com
 centro, Home Assistant e websocket falsos (nada sai da máquina):
 
 ```

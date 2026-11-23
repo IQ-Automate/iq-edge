@@ -155,7 +155,8 @@ class Router:
             return 'agent', ''
         started = self.clock()
         try:
-            decision, problem = self.center.voice_route(text, (language or 'pt').split('-')[0].split('_')[0].lower() or 'pt'), ''
+            decision = self.center.voice_route(text, (language or 'pt').split('-')[0].split('_')[0].lower() or 'pt')
+            problem = ''
         except NoRoute as error:
             decision, problem = None, str(error.reason)
         if problem != 'unpaired':  # a home that is not paired makes no call: it is not part of the average
