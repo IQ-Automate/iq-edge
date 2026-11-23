@@ -1,11 +1,14 @@
 """The add-on's tab in Home Assistant (ingress, port 8099): "Estado" (paired or not, last contact, version, the center's AI for the Bom
 dia, the Bom dia prepared ahead, Home Assistant's event iq_bom_dia, Parear / Desparear) and
 "Bom dia" (sources, how many, total, words, rules, speaker among the home's media_player, volume, voice engine, language, unit, the
-automatic speech's time and days; "Testar" shows the text, "Salvar" keeps it here and sends it to the platform, "Falar agora").
+automatic speech's time and days; "Testar" shows the text, "Salvar" keeps it here and sends it to the platform, "Falar agora") and
+"Assistente" (0.2.5, only when the voice router runs: the address, user and password to type in the integration "webhook-conversation",
+the mode, the chosen agent and the counters since the start; never a word of a request).
 
 Only the Supervisor's ingress proxy (172.30.32.2) may connect (any other address gets 403): Home Assistant already signed the person
-in and tells who it is (X-Remote-User-*; trusted only because of that). Plain HTML, no script, relative links under X-Ingress-Path,
-forms POST with an anti-CSRF token per Home Assistant user. Standard library only (http.server, one thread per request)."""
+in and tells who it is (X-Remote-User-*; trusted only because of that). Plain HTML, relative links under X-Ingress-Path, forms POST
+with an anti-CSRF token per Home Assistant user; the only script is /assistente.js (a "copy" button, on the Assistente page once the
+password is shown). Standard library only (http.server, one thread per request)."""
 import hashlib
 import hmac
 import html
@@ -17,7 +20,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-from . import briefing, prefs, ready, relay, schedule, settings
+from . import briefing, prefs, ready, relay, schedule, settings, voice_http
 
 logger = logging.getLogger('iq_edge.web')
 INGRESS = re.compile(r'/api/hassio_ingress/[A-Za-z0-9_-]{1,128}')
@@ -27,7 +30,26 @@ MAX_FORM = 64 * 1024
 DAYS = (('seg', 'Mon'), ('ter', 'Tue'), ('qua', 'Wed'), ('qui', 'Thu'), ('sex', 'Fri'), ('sáb', 'Sat'), ('dom', 'Sun'))
 UNITS = (('language', 'pelo idioma', 'by language'), ('C', '°C', '°C'), ('F', '°F', '°F'), ('FC', '°F e °C', '°F and °C'))
 ENGINES = (('elevenlabs', 'ElevenLabs'), ('google', 'Google'))
-CSP = "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'"
+CSP = "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'"
+COPY_JS = """document.addEventListener('click', function (event) {
+  var button = event.target.closest('[data-copy]');
+  var field = button && document.getElementById(button.getAttribute('data-copy'));
+  if (!field) return;
+  field.focus();
+  field.select();
+  var done = function () { button.textContent = button.getAttribute('data-done'); };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(field.value).then(done, function () { document.execCommand('copy'); done(); });
+  } else {
+    document.execCommand('copy');
+    done();
+  }
+});
+"""
+MODES = {'on': ('Ligado: o centro decide para onde vai cada pedido', 'On: the center decides where each request goes'),
+         'observe': ('Observando: tudo vai ao assistente; o centro só é consultado e a decisão é contada',
+                     'Observing: everything goes to the assistant; the center is only asked and its decision counted'),
+         'off': ('Desligado: tudo vai ao assistente, sem consultar o centro', 'Off: everything goes to the assistant, the center is not asked')}
 FIELDS = {
     'sources': ('Fontes: de 1 a 20 linhas "Nome = endereço http(s)"', 'Sources: 1 to 20 lines "Name = http(s) address"'),
     'picks': ('Quantas por fonte: de 0 a 6', 'How many per source: 0 to 6'),
@@ -58,7 +80,7 @@ button,.button{font:inherit;font-weight:600;padding:8px 16px;border-radius:8px;m
 color:var(--accent);cursor:pointer;text-decoration:none;display:inline-flex;align-items:center}button.primary{background:var(--accent);color:var(--bg)}
 button.danger{border-color:var(--warn);color:var(--warn)}.note{padding:12px;border-radius:8px;border:1px solid var(--line);margin-bottom:16px}
 .text{white-space:pre-wrap}.code{font-family:Consolas,monospace;font-size:20px;letter-spacing:4px}dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
-dt{color:var(--muted);font-size:13px}dd{margin:0}
+dt{color:var(--muted);font-size:13px}dd{margin:0;overflow-wrap:anywhere}
 """
 
 
@@ -119,10 +141,11 @@ def parse_form(form, current):
 
 class App:
     """What the pages need: the center client (status, pair, unpair, send_prefs, the AI's last answer), the listener of Home
-    Assistant's event iq_bom_dia (None outside Home Assistant) and a per-process secret for the CSRF tokens."""
+    Assistant's event iq_bom_dia (None outside Home Assistant), the voice router (None: no Assistente page) and a per-process secret
+    for the CSRF tokens."""
 
-    def __init__(self, center, listener=None):
-        self.center, self.listener = center, listener
+    def __init__(self, center, listener=None, voice=None):
+        self.center, self.listener, self.voice = center, listener, voice
         self.secret = secrets.token_bytes(32)
 
     def csrf(self, user_id):
@@ -174,7 +197,9 @@ def make_handler(app):
         def page(self, title, active, body, status=200):
             base = self.base()
             nav = (f'<nav><a href="{_e(base)}/"{" class=on" if active == "estado" else ""}>{self.t("Estado", "Status")}</a>'
-                   f'<a href="{_e(base)}/bom-dia"{" class=on" if active == "bomdia" else ""}>{self.t("Bom dia", "Good morning")}</a></nav>')
+                   f'<a href="{_e(base)}/bom-dia"{" class=on" if active == "bomdia" else ""}>{self.t("Bom dia", "Good morning")}</a>'
+                   + (f'<a href="{_e(base)}/assistente"{" class=on" if active == "assistente" else ""}>{self.t("Assistente", "Assistant")}</a>'
+                      if app.voice is not None else '') + '</nav>')
             lang = 'pt-BR' if self.pt() else 'en'
             return self.send(status, f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" '
                                      f'content="width=device-width,initial-scale=1"><title>{_e(title)} · IQ</title>'
@@ -212,6 +237,10 @@ def make_handler(app):
                 return self.briefing_page()
             if path == '/desparear':
                 return self.unpair_page()
+            if app.voice is not None and path == '/assistente':
+                return self.assistant_page()
+            if app.voice is not None and path == '/assistente.js':
+                return self.send(200, COPY_JS, 'text/javascript; charset=utf-8')
             return self.send(404, self.t('Página não encontrada', 'Page not found'), 'text/plain; charset=utf-8')
 
         def do_POST(self):
@@ -229,6 +258,8 @@ def make_handler(app):
                 return self.unpair(form)
             if path == '/bom-dia':
                 return self.briefing_post(form)
+            if app.voice is not None and path == '/assistente/senha':
+                return self.assistant_page(reveal=True)
             if path == '/falar':
                 spoken, _ = prefs.speak_now()
                 note = self.t('Falando o Bom dia no alto-falante escolhido.', 'Speaking the good morning on the chosen speaker.') if spoken else \
@@ -409,6 +440,45 @@ def make_handler(app):
                 prefs.mark_synced(version)
                 return self.briefing_page(note=self.t(f'Salvo. A plataforma guardou a versão {version}.', f'Saved. The platform kept version {version}.'), tone='ok')
             return self.briefing_page(note=self.t('Salvo nesta casa. A plataforma recebe quando a conexão voltar.', 'Saved in this home. The platform gets it when the connection is back.'), tone='ok')
+
+        # ---- Assistente (the voice router) ----
+        def assistant_page(self, reveal=False):
+            """What to type in the integration (address, user, password: shown only after the button, by POST), the mode, the chosen
+            agent and the counters since the start. Never a word of a request: there is none here."""
+            stats = app.voice.stats()
+            mode, agent = settings.voice_route_mode(), settings.voice_agent()
+            address = f'http://{settings.addon_hostname()}:{settings.voice_port()}{voice_http.PATH}'
+            if reveal:
+                secret = (f'<input id="voice-password" value="{_e(voice_http.password())}" readonly spellcheck="false" '
+                          f'autocomplete="off"><div class="actions"><button type="button" data-copy="voice-password" '
+                          f'data-done="{_e(self.t("Copiado", "Copied"))}">{self.t("Copiar", "Copy")}</button></div>'
+                          f'<script src="{_e(self.base())}/assistente.js"></script>')
+            else:
+                secret = (f'<form method="post" action="{_e(self.base())}/assistente/senha">{self.token_field()}<div class="actions">'
+                          f'<button type="submit">{self.t("Mostrar a senha", "Show the password")}</button></div></form>')
+            average = stats['center_avg_ms']
+            rows = ''.join(f'<dt>{label}</dt><dd>{_e(value)}</dd>' for label, value in (
+                (self.t('Foram ao assistente local', 'Went to the local assistant'), stats['local']),
+                (self.t('Foram ao assistente', 'Went to the assistant'), stats['agent']),
+                (self.t('Plano B (centro ou assistente local sem resposta)', 'Fallback (center or local assistant gave no answer)'), stats['fallback']),
+                (self.t('Sem resposta de ninguém', 'Nobody answered'), stats['failed']),
+                (self.t('Tempo médio da consulta ao centro', 'Average time of the center call'),
+                 f'{average} ms' if average is not None else '—')))
+            if mode == 'observe':
+                rows += (f'<dt>{self.t("Decisões do centro (só observadas)", "Center decisions (only observed)")}</dt><dd>'
+                         f'{self.t("local", "local")} {stats["observed_local"]} · {self.t("assistente", "assistant")} {stats["observed_agent"]}</dd>')
+            if stats['problem']:
+                rows += f'<dt>{self.t("Último problema", "Last problem")}</dt><dd>{_e(stats["problem"])}</dd>'
+            body = (f'<section><h1>{self.t("Assistente de voz", "Voice assistant")}</h1><p class="muted">'
+                    f'{self.t("Na integração Webhook Conversation do Home Assistant, crie um agente de conversa com estes dados e escolha-o no assistente de voz.", "In the Home Assistant integration Webhook Conversation, create a conversation agent with these values and pick it in the voice assistant.")}'
+                    f'</p><dl><dt>{self.t("Endereço", "Address")}</dt><dd class="text">{_e(address)}</dd>'
+                    f'<dt>{self.t("Usuário", "User")}</dt><dd>{_e(voice_http.USER)}</dd>'
+                    f'<dt>{self.t("Senha", "Password")}</dt><dd>{secret}</dd>'
+                    f'<dt>{self.t("Modo", "Mode")}</dt><dd>{_e(self.t(*MODES[mode]))}</dd>'
+                    f'<dt>{self.t("Assistente escolhido", "Chosen assistant")}</dt><dd>{_e(agent or self.t("nenhum (opção voice_agent)", "none (option voice_agent)"))}</dd></dl></section>'
+                    f'<section><h2>{self.t("Desde que o add-on iniciou", "Since the add-on started")}</h2><dl>{rows}</dl>'
+                    f'<p class="muted">{self.t("O texto dos pedidos nunca é guardado.", "The text of the requests is never kept.")}</p></section>')
+            return self.page(self.t('Assistente', 'Assistant'), 'assistente', body)
 
     return Handler
 
