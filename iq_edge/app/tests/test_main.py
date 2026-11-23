@@ -1,5 +1,7 @@
-"""python -m iq_edge (0.2.5): the voice router's door starts with the add-on, from the options, with its own password and port, and a port
-that is taken never stops the rest of the add-on. The signals and the Home Assistant event listener are replaced; the servers are real."""
+"""python -m iq_edge (0.2.5): the voice router's door starts with the add-on only when an agent is set (voice_agent or voice_agent_url),
+with its own password and port; with every voice option empty (or only voice_route) there is no door and no /data/voice.json, as in 0.2.4;
+a port that is taken never stops the rest of the add-on. The signals and the Home Assistant event listener are replaced; the servers
+are real."""
 import base64
 import json
 import logging
@@ -13,7 +15,7 @@ from unittest import mock
 
 from iq_edge import __main__ as main_module
 from iq_edge import briefing, settings, voice_http
-from tests.fakes import EdgeCase
+from tests.fakes import EdgeCase, FakeAgent
 
 
 def free_port():
@@ -90,11 +92,10 @@ class MainTests(EdgeCase):
         status, answer = self.post(port, password)  # not paired: the center is not asked, the agent (the fake HA) answers
         self.assertEqual((status, answer), (200, {'output': 'Resposta do assistente.'}))
         self.assertEqual([body['agent_id'] for body in self.ha.conversations], ['conversation.iq_assistant'])
-        connection = HTTPConnection('127.0.0.1', self.web_port, timeout=30)  # the tab is still there, with the new page
-        connection.request('GET', '/assistente', headers={'X-Ingress-Path': '/api/hassio_ingress/abc'})
-        page = connection.getresponse().read().decode('utf-8')
-        connection.close()
+        self.assertTrue((settings.data_dir() / 'voice.json').exists())
+        page = self.page('/assistente')[1]  # the tab is still there, with the router's page
         self.assertIn('/v1/conversation', page)
+        self.assertIn('conversation.iq_assistant', page)
         self.assertNotIn(password, page)
         logged = '\n'.join(self.records.lines)
         self.assertIn('Roteador de voz na porta', logged)
@@ -104,28 +105,94 @@ class MainTests(EdgeCase):
         self.stop()
         self.assertFalse(self.thread.is_alive())
 
-    def test_without_options_the_router_runs_and_says_there_is_no_assistant(self):
-        settings.write_json(settings.data_dir() / 'options.json', {'center_url': self.center.url}, private=False)
-        for name in ('IQ_VOICE_AGENT', 'IQ_VOICE_ROUTE'):
+    def options(self, **values):
+        settings.write_json(settings.data_dir() / 'options.json', dict({'center_url': self.center.url}, **values), private=False)
+        for name in settings.VOICE_OPTIONS.values():
             os.environ.pop(name, None)
+
+    def page(self, path):
+        connection = HTTPConnection('127.0.0.1', self.web_port, timeout=30)  # the tab, as the Supervisor's ingress proxy opens it
+        connection.request('GET', path, headers={'X-Ingress-Path': '/api/hassio_ingress/abc'})
+        answer = connection.getresponse()
+        text = answer.read().decode('utf-8')
+        connection.close()
+        return answer.status, text
+
+    def assertNoDoor(self, port):
+        self.assertTrue(self.wait_for(self.web_port))  # (the tab starts after the door would have)
+        with self.assertRaises(OSError):
+            socket.create_connection(('127.0.0.1', port), timeout=2).close()
+        self.assertFalse((settings.data_dir() / 'voice.json').exists())  # no new file
+        self.assertNotIn('Roteador de voz na porta', '\n'.join(self.records.lines))
+        status, page = self.page('/assistente')  # the tab says the router is off and what turns it on
+        self.assertEqual(status, 200)
+        self.assertIn('O roteador de voz está desligado', page)
+        self.assertIn('voice_agent', page)
+        self.assertIn('voice_agent_url', page)
+        for hidden in ('/v1/conversation', 'Mostrar a senha', 'Foram ao assistente'):
+            self.assertNotIn(hidden, page)
+
+    def test_with_every_voice_option_empty_there_is_no_door_and_no_file(self):
+        self.options(voice_agent='', voice_route='', voice_agent_url='', voice_agent_user='', voice_agent_password='')
+        port = free_port()
+        self.start(port)
+        self.assertNoDoor(port)
+        self.assertEqual(self.page('/')[0], 200)  # the rest of the add-on is what it was
+
+    def test_a_mode_or_a_user_alone_does_not_start_the_door(self):
+        self.options(voice_route='observe', voice_agent_user='franco', voice_agent_password='senha')
+        port = free_port()
+        self.start(port)
+        self.assertNoDoor(port)
+
+    def test_the_door_starts_with_only_an_address_and_hands_the_request_over(self):
+        agent = FakeAgent()
+        self.addCleanup(agent.stop)
+        self.options(voice_agent_url=agent.address + '?token=chave-secreta', voice_agent_user='usuario-secreto',
+                     voice_agent_password='senha-secreta')
         port = free_port()
         self.start(port)
         self.assertTrue(self.wait_for(port))
-        self.assertNotIn('IQ_VOICE_AGENT', os.environ)
+        self.assertTrue((settings.data_dir() / 'voice.json').exists())
+        status, answer = self.post(port, voice_http.password())  # not paired: the center is not asked, the address answers
+        self.assertEqual((status, answer), (200, {'output': 'Resposta do agente antigo.'}))
+        self.assertEqual(agent.requests[0]['path'], '/hook?token=chave-secreta')
+        self.assertEqual(json.loads(agent.requests[0]['body']), {'query': 'oi', 'language': 'pt'})
+        self.assertEqual(self.ha.conversations, [])
+        status, page = self.page('/assistente')
+        self.assertIn('/v1/conversation', page)
+        self.assertIn('agente por endereço', page)
+        logged = '\n'.join(self.records.lines + [page])
+        self.assertIn('assistente por endereço', logged)
+        for secret in (agent.url[len('http://'):], 'chave-secreta', 'usuario-secreto', 'senha-secreta', voice_http.password()):
+            self.assertNotIn(secret, logged)
+
+    def test_a_refused_address_still_starts_the_door_and_says_so(self):
+        self.options(voice_agent_url='ftp://usuario-secreto:senha-secreta@agent.local/hook')
+        port = free_port()
+        self.start(port)
+        self.assertTrue(self.wait_for(port))
         status, answer = self.post(port, voice_http.password())
         self.assertEqual(status, 200)
         self.assertIn('sem assistente configurado', answer['output'])
-        self.assertIn('sem assistente escolhido', '\n'.join(self.records.lines))
+        page = self.page('/assistente')[1]
+        self.assertIn('endereço recusado', page)
+        logged = '\n'.join(self.records.lines + [page])
+        self.assertIn('foi recusado', logged)
+        for secret in ('usuario-secreto', 'senha-secreta', 'agent.local'):
+            self.assertNotIn(secret, logged)
 
     def test_a_port_that_is_taken_does_not_stop_the_add_on(self):
+        self.options(voice_agent='conversation.iq_assistant')
         with mock.patch.object(main_module.voice_http, 'start', side_effect=OSError('address in use')):  # (Windows lets a port be shared)
             self.start(8098)
             self.assertTrue(self.wait_for(self.web_port))  # the tab works as before
-            connection = HTTPConnection('127.0.0.1', self.web_port, timeout=30)
-            connection.request('GET', '/', headers={'X-Ingress-Path': '/api/hassio_ingress/abc'})
-            page = connection.getresponse().read().decode('utf-8')
-            connection.close()
-            self.assertNotIn('/assistente', page)  # no router, no Assistente tab
+            status, page = self.page('/')
+            self.assertEqual(status, 200)
+            self.assertIn('/assistente', page)  # the Assistente page is always there...
+            status, page = self.page('/assistente')
+            self.assertIn('não abriu a porta', page)  # ...and says the router did not open (the options are filled in)
+            self.assertNotIn('/v1/conversation', page)
             self.assertIn('Não consegui abrir o roteador de voz', '\n'.join(self.records.lines))
             self.stop()
 

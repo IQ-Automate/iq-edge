@@ -2,8 +2,9 @@
 dia, the Bom dia prepared ahead, Home Assistant's event iq_bom_dia, Parear / Desparear) and
 "Bom dia" (sources, how many, total, words, rules, speaker among the home's media_player, volume, voice engine, language, unit, the
 automatic speech's time and days; "Testar" shows the text, "Salvar" keeps it here and sends it to the platform, "Falar agora") and
-"Assistente" (0.2.5, only when the voice router runs: the address, user and password to type in the integration "webhook-conversation",
-the mode, the chosen agent and the counters since the start; never a word of a request).
+"Assistente" (0.2.5: with the voice router off it says so and which options turn it on; with it running, the address, user and
+password to type in the integration "webhook-conversation", the mode, the kind of agent chosen (the entity, or only "agent by address":
+never the address) and the counters since the start; never a word of a request).
 
 Only the Supervisor's ingress proxy (172.30.32.2) may connect (any other address gets 403): Home Assistant already signed the person
 in and tells who it is (X-Remote-User-*; trusted only because of that). Plain HTML, relative links under X-Ingress-Path, forms POST
@@ -141,8 +142,8 @@ def parse_form(form, current):
 
 class App:
     """What the pages need: the center client (status, pair, unpair, send_prefs, the AI's last answer), the listener of Home
-    Assistant's event iq_bom_dia (None outside Home Assistant), the voice router (None: no Assistente page) and a per-process secret
-    for the CSRF tokens."""
+    Assistant's event iq_bom_dia (None outside Home Assistant), the voice router (None: it is off; the Assistente page says so) and a per-process
+    secret for the CSRF tokens."""
 
     def __init__(self, center, listener=None, voice=None):
         self.center, self.listener, self.voice = center, listener, voice
@@ -198,8 +199,7 @@ def make_handler(app):
             base = self.base()
             nav = (f'<nav><a href="{_e(base)}/"{" class=on" if active == "estado" else ""}>{self.t("Estado", "Status")}</a>'
                    f'<a href="{_e(base)}/bom-dia"{" class=on" if active == "bomdia" else ""}>{self.t("Bom dia", "Good morning")}</a>'
-                   + (f'<a href="{_e(base)}/assistente"{" class=on" if active == "assistente" else ""}>{self.t("Assistente", "Assistant")}</a>'
-                      if app.voice is not None else '') + '</nav>')
+                   f'<a href="{_e(base)}/assistente"{" class=on" if active == "assistente" else ""}>{self.t("Assistente", "Assistant")}</a></nav>')
             lang = 'pt-BR' if self.pt() else 'en'
             return self.send(status, f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" '
                                      f'content="width=device-width,initial-scale=1"><title>{_e(title)} · IQ</title>'
@@ -237,7 +237,7 @@ def make_handler(app):
                 return self.briefing_page()
             if path == '/desparear':
                 return self.unpair_page()
-            if app.voice is not None and path == '/assistente':
+            if path == '/assistente':
                 return self.assistant_page()
             if app.voice is not None and path == '/assistente.js':
                 return self.send(200, COPY_JS, 'text/javascript; charset=utf-8')
@@ -442,11 +442,34 @@ def make_handler(app):
             return self.briefing_page(note=self.t('Salvo nesta casa. A plataforma recebe quando a conexão voltar.', 'Saved in this home. The platform gets it when the connection is back.'), tone='ok')
 
         # ---- Assistente (the voice router) ----
+        def assistant_off(self):
+            """The page when the router does not run: that it is off and which options of the add-on's Configuration tab turn it on (or,
+            with the options filled, that the port did not open). No address, no password, no counters."""
+            if settings.voice_enabled():
+                note = self.t(f'As opções do roteador estão preenchidas, mas ele não abriu a porta {settings.voice_port()}. '
+                              'Veja o registro do add-on.', f'The router options are filled in, but it did not open port {settings.voice_port()}. '
+                              'See the add-on log.')
+            else:
+                note = self.t('O roteador de voz está desligado. Para ligar, abra a aba Configuração do add-on, preencha voice_agent '
+                              '(um assistente que é uma entidade conversation.* do Home Assistant) ou voice_agent_url (o endereço de '
+                              'um assistente externo, com voice_agent_user e voice_agent_password se ele pedir) e reinicie o add-on. '
+                              'Só voice_route não liga o roteador.',
+                              'The voice router is off. To turn it on, open the add-on Configuration tab, fill in voice_agent (an '
+                              'assistant that is a conversation.* entity of Home Assistant) or voice_agent_url (the address of an '
+                              'outside assistant, with voice_agent_user and voice_agent_password if it asks) and restart the add-on. '
+                              'voice_route alone does not turn the router on.')
+            return f'<section><h1>{self.t("Assistente de voz", "Voice assistant")}</h1><p class="note">{_e(note)}</p></section>'
+
         def assistant_page(self, reveal=False):
             """What to type in the integration (address, user, password: shown only after the button, by POST), the mode, the chosen
             agent and the counters since the start. Never a word of a request: there is none here."""
+            if app.voice is None:
+                return self.page(self.t('Assistente', 'Assistant'), 'assistente', self.assistant_off())
             stats = app.voice.stats()
-            mode, agent = settings.voice_route_mode(), settings.voice_agent()
+            mode = settings.voice_route_mode()
+            kind = settings.voice_agent_kind()
+            agent = {'entity': settings.voice_agent(), 'url': self.t('agente por endereço', 'agent by address'),
+                     'refused': self.t('agente por endereço (endereço recusado)', 'agent by address (address refused)')}.get(kind)
             address = f'http://{settings.addon_hostname()}:{settings.voice_port()}{voice_http.PATH}'
             if reveal:
                 secret = (f'<input id="voice-password" value="{_e(voice_http.password())}" readonly spellcheck="false" '
@@ -475,7 +498,7 @@ def make_handler(app):
                     f'<dt>{self.t("Usuário", "User")}</dt><dd>{_e(voice_http.USER)}</dd>'
                     f'<dt>{self.t("Senha", "Password")}</dt><dd>{secret}</dd>'
                     f'<dt>{self.t("Modo", "Mode")}</dt><dd>{_e(self.t(*MODES[mode]))}</dd>'
-                    f'<dt>{self.t("Assistente escolhido", "Chosen assistant")}</dt><dd>{_e(agent or self.t("nenhum (opção voice_agent)", "none (option voice_agent)"))}</dd></dl></section>'
+                    f'<dt>{self.t("Assistente escolhido", "Chosen assistant")}</dt><dd>{_e(agent or self.t("nenhum (opções voice_agent ou voice_agent_url)", "none (options voice_agent or voice_agent_url)"))}</dd></dl></section>'
                     f'<section><h2>{self.t("Desde que o add-on iniciou", "Since the add-on started")}</h2><dl>{rows}</dl>'
                     f'<p class="muted">{self.t("O texto dos pedidos nunca é guardado.", "The text of the requests is never kept.")}</p></section>')
             return self.page(self.t('Assistente', 'Assistant'), 'assistente', body)
