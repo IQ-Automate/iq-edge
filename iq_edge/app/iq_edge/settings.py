@@ -13,15 +13,20 @@ Outside Home Assistant (tests, a developer's machine) the same code runs with en
   IQ_SUPERVISOR_URL           instead of http://supervisor (only used to clear the code from the options after pairing)
   IQ_INGRESS_PORT, IQ_INGRESS_PEERS   the tab's port (8099) and who may open it (only 172.30.32.2, the Supervisor; tests only)
   IQ_HA_WS_URL                instead of ws://supervisor/core/websocket (Home Assistant's event iq_bom_dia, events.py)
+  IQ_VOICE_PORT, IQ_VOICE_HOSTNAME    the voice router's port (8098) and the host name shown on the tab (default: the container's)
 Nothing here is ever logged.
 
 The Bom dia's options (lote A5, all optional in config.yaml) become, at start, the IQ_BRIEFING_* variables briefing.py and
-schedule.py read (BRIEFING_OPTIONS); an option left empty sets nothing (the code's default)."""
+schedule.py read (BRIEFING_OPTIONS); an option left empty sets nothing (the code's default). The voice router's options (lote J1b,
+0.2.5, VOICE_OPTIONS) work the same way (IQ_VOICE_AGENT, IQ_VOICE_ROUTE, and for an agent by address IQ_VOICE_AGENT_URL, _USER and
+_PASSWORD); with neither voice_agent nor voice_agent_url set the voice router does not run at all (voice_enabled)."""
+import ipaddress
 import json
 import os
 import platform
 import re
 import secrets
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -133,6 +138,131 @@ def apply_briefing_options():
         os.environ[variable] = str(value).strip()[:200]
         applied.append(option)
     return applied
+
+
+VOICE_OPTIONS = {
+    'voice_agent': 'IQ_VOICE_AGENT',
+    'voice_route': 'IQ_VOICE_ROUTE',
+    'voice_agent_url': 'IQ_VOICE_AGENT_URL',
+    'voice_agent_user': 'IQ_VOICE_AGENT_USER',
+    'voice_agent_password': 'IQ_VOICE_AGENT_PASSWORD',
+}
+VOICE_AGENT = re.compile(r'conversation\.[a-z0-9_]{1,200}')
+VOICE_MODES = ('on', 'observe', 'off')
+AGENT_URL_MAX = 2000
+
+
+def apply_voice_options():
+    """At start: each voice router option that is set AND valid becomes its IQ_VOICE_* variable (an entity id that is not a
+    `conversation.*`, or a mode that is not on/observe/off, is ignored: the default stands). The agent's address, user and password
+    are taken as typed (the password untouched); an address that is not usable is kept all the same, so that the router knows it was
+    set and says so (voice_agent_url_state). Returns the option names applied (for the log; never the values)."""
+    data = options()
+    applied = []
+    for option, variable in VOICE_OPTIONS.items():
+        value = data.get(option)
+        if not isinstance(value, str):
+            continue
+        if option != 'voice_agent_password':
+            value = value.strip()
+        if option in ('voice_agent', 'voice_route'):
+            value = value.lower()
+        if option == 'voice_agent' and not VOICE_AGENT.fullmatch(value):
+            continue
+        if option == 'voice_route' and value not in VOICE_MODES:
+            continue
+        if not value.strip():  # empty (or only spaces) = not set
+            continue
+        os.environ[variable] = value
+        applied.append(option)
+    return applied
+
+
+def voice_agent():
+    """The conversation entity that gets the requests that are not simple; '' = none configured."""
+    value = os.getenv('IQ_VOICE_AGENT', '').strip().lower()
+    return value if VOICE_AGENT.fullmatch(value) else ''
+
+
+def _own_address(host, port):
+    """True when host:port is this add-on's own voice listener: its host name (any port: nothing else of this container is an agent), or
+    this machine (localhost, 127.x, ::1, 0.0.0.0) on the listener's port."""
+    host = host.lower().rstrip('.')
+    own = addon_hostname().lower()
+    if own and (host == own or host.startswith(own + '.')):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+        address = getattr(address, 'ipv4_mapped', None) or address
+        here = address.is_loopback or address.is_unspecified
+    except ValueError:
+        here = host == 'localhost' or host.endswith('.localhost')
+    return here and port == voice_port()
+
+
+def _agent_url_problem(value):
+    """'' when the router may call `value`; 'invalid' (not an http or https address with a host, or with a user or password inside)
+    or 'itself' (it points at this add-on's own voice listener: the router would call itself)."""
+    if len(value) > AGENT_URL_MAX or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        return 'invalid'
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return 'invalid'
+    if parts.scheme.lower() not in ('http', 'https') or not parts.hostname or '@' in parts.netloc or port == 0:
+        return 'invalid'
+    return 'itself' if _own_address(parts.hostname, port or (443 if parts.scheme.lower() == 'https' else 80)) else ''
+
+
+def voice_agent_url_state():
+    """(address, problem) of the option voice_agent_url: ('', '') = not set; (address, '') = usable; ('', 'invalid') or ('', 'itself')
+    = set but refused (see _agent_url_problem). The address is a secret of the home: never log it, never show it."""
+    value = os.getenv('IQ_VOICE_AGENT_URL', '').strip()
+    if not value:
+        return '', ''
+    problem = _agent_url_problem(value)
+    return ('', problem) if problem else (value, '')
+
+
+def voice_agent_kind():
+    """What kind of agent is set: 'url' (by address), 'refused' (an address is set but refused), 'entity' (a conversation.* entity of
+    Home Assistant) or '' (none). The address wins over the entity."""
+    address, refused = voice_agent_url_state()
+    return 'refused' if refused else 'url' if address else 'entity' if voice_agent() else ''
+
+
+def voice_agent_user():
+    return os.getenv('IQ_VOICE_AGENT_USER', '')
+
+
+def voice_agent_password():
+    return os.getenv('IQ_VOICE_AGENT_PASSWORD', '')
+
+
+def voice_enabled():
+    """The voice router runs only when an agent is set: voice_agent or voice_agent_url (even a refused address: the router then says so).
+    Both empty = the add-on is what 0.2.4 was (no listener, no file). voice_route alone does not turn it on."""
+    return bool(voice_agent() or os.getenv('IQ_VOICE_AGENT_URL', '').strip())
+
+
+def voice_route_mode():
+    """'on' (the center decides; also when empty), 'observe' (asks the center, always the agent) or 'off' (never asks the center)."""
+    value = os.getenv('IQ_VOICE_ROUTE', '').strip().lower()
+    return value if value in VOICE_MODES else 'on'
+
+
+def voice_port():
+    try:
+        return int(os.getenv('IQ_VOICE_PORT', '8098'))
+    except ValueError:
+        return 8098
+
+
+def addon_hostname():
+    """The add-on's name on the Supervisor's internal network (the Supervisor sets it as the container's host name): what Home
+    Assistant Core types in the integration's address."""
+    return (os.getenv('IQ_VOICE_HOSTNAME') or socket.gethostname()).strip()[:100]
 
 
 def center_url():

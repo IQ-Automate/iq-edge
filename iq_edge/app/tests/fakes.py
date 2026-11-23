@@ -1,11 +1,12 @@
 """A FAKE IQ center (contract v2, in memory) and a FAKE Home Assistant (REST API through the 'Supervisor'), each an http.server in a
 thread on 127.0.0.1. Nothing here reaches the internet. The fake HA also answers /addons/self/options (the Supervisor) and /rss
-(a news feed), so the add-on's whole path runs locally."""
+(a news feed), so the add-on's whole path runs locally. FakeAgent is the old assistant's webhook (0.2.5, lote J1b)."""
 import json
 import os
 import re
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
@@ -46,6 +47,10 @@ class FakeHA(_Server):
         self.tts_requests, self.tts_fail, self.service_calls = [], False, []
         # 0.2.2: the events the add-on fired (POST /api/events/<type>): [(type, data)] (iq_briefing, iq_bom_dia_done)
         self.events = []
+        # 0.2.5 (lote J1b): the conversation API (POST /api/conversation/process): every body kept; `conversation_answers` maps an
+        # agent_id to (status, JSON) or to a function of the body returning that; without an entry the local assistant answers with an
+        # error response (no intent matched) and any other agent with a sentence, both keeping the conversation id they were given
+        self.conversations, self.conversation_answers, self.conversation_delay = [], {}, 0
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -105,6 +110,14 @@ class FakeHA(_Server):
                                              'path': '/api/tts_proxy/abc123.mp3'})
                 if method == 'GET' and path == '/api/tts_proxy/abc123.mp3':
                     return self.answer(200, raw=b'ID3' + b'\0' * 2048, content_type='audio/mpeg')
+                if method == 'POST' and path == '/api/conversation/process':
+                    data = json.loads(body)
+                    fake.conversations.append(data)
+                    if fake.conversation_delay:
+                        time.sleep(fake.conversation_delay)
+                    given = fake.conversation_answers.get(data.get('agent_id'))
+                    given = given(data) if callable(given) else given
+                    return self.answer(*(given or fake.default_conversation(data)))
                 if method == 'POST' and path.startswith('/api/services/'):
                     fake.service_calls.append((path, json.loads(body) if body else None))
                     return self.answer(200, [])  # the Bom dia's own speech only (tts.speak, volume_set...); the relay never comes here
@@ -127,9 +140,22 @@ class FakeHA(_Server):
     def requests_to(self, prefix):
         return [(m, p) for m, p in self.log if p.startswith(prefix)]
 
+    def default_conversation(self, data):
+        conversation_id = data.get('conversation_id') or f'ha-{len(self.conversations)}'
+        if data.get('agent_id') == 'conversation.home_assistant':
+            return 200, conversation_response('', 'error', conversation_id, code='no_intent_match')
+        return 200, conversation_response('Resposta do assistente.', 'query_answer', conversation_id)
+
     def done_events(self):
         """The data of every iq_bom_dia_done the add-on fired (the end of the Bom dia's speech)."""
         return [data for kind, data in self.events if kind == 'iq_bom_dia_done']
+
+
+def conversation_response(speech, response_type='action_done', conversation_id='conv-1', code=None):
+    """What Home Assistant's POST /api/conversation/process answers (the speech lives in response.speech.plain.speech)."""
+    response = {'response_type': response_type, 'language': 'pt', 'data': {'code': code} if code else {'targets': [], 'success': [], 'failed': []},
+                'speech': {'plain': {'speech': speech, 'extra_data': None}}}
+    return {'response': response, 'conversation_id': conversation_id}
 
 
 class FakeCenter(_Server):
@@ -142,6 +168,10 @@ class FakeCenter(_Server):
         # briefing-compose (lote A5): (status, JSON answer or raw bytes, extra headers); every call kept with its headers
         self.compose_answer = (503, {'error': 'no_key', 'message': 'no key'}, {})
         self.composed = []
+        # voice-route (lote J1b, 0.2.5): the same shape; `route_delay` seconds before answering; every call kept with its headers
+        self.route_answer = (200, {'route': 'agent', 'category': 'unknown', 'sensitive': False, 'confidence': None, 'engine': 'none',
+                                   'reason': 'test', 'ms': 3}, {})
+        self.routed, self.route_delay = [], 0
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -212,6 +242,23 @@ class FakeCenter(_Server):
                     self.end_headers()
                     self.wfile.write(raw)
                     return None
+                if method == 'POST' and path == 'voice-route':
+                    fake.routed.append({'body': data, 'headers': dict(self.headers)})
+                    if fake.route_delay:
+                        time.sleep(fake.route_delay)
+                    status, answer, extra = fake.route_answer
+                    raw = answer if isinstance(answer, bytes) else json.dumps(answer).encode()
+                    try:  # a slow answer: the add-on may have given up and closed the connection already
+                        self.send_response(status)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(raw)))
+                        for name, value in extra.items():
+                            self.send_header(name, value)
+                        self.end_headers()
+                        self.wfile.write(raw)
+                    except OSError:
+                        pass
+                    return None
                 return self.answer(404, {'error': 'route'})
 
             def do_GET(self):
@@ -225,6 +272,44 @@ class FakeCenter(_Server):
     def queue(self, kind, request, job_id='0f0f0f0f-0000-4000-8000-000000000001', deadline='2099-01-01T00:00:00+00:00'):
         self.jobs.append({'id': job_id, 'kind': kind, 'request': request, 'deadline': deadline, 'contract': 2})
         return job_id
+
+
+class FakeAgent(_Server):
+    """An old assistant's webhook, as the integration "webhook-conversation" talks to it: every POST kept (path, the headers as sent,
+    the RAW body bytes), then answered with `answer` = (status, content type or None, body bytes), or a function of the kept request
+    returning that, after `delay` seconds."""
+
+    def __init__(self):
+        self.requests, self.delay = [], 0
+        self.answer = (200, 'application/json', b'{"output": "Resposta do agente antigo."}')
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                kept = {'path': self.path, 'headers': dict(self.headers), 'body': body}
+                fake.requests.append(kept)
+                if fake.delay:
+                    time.sleep(fake.delay)
+                status, content_type, data = fake.answer(kept) if callable(fake.answer) else fake.answer
+                try:  # a slow answer: the add-on may have given up and closed the connection already
+                    self.send_response(status)
+                    if content_type:
+                        self.send_header('Content-Type', content_type)
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                except OSError:
+                    pass
+
+        self.start(Handler)
+
+    @property
+    def address(self):
+        return self.url + '/hook'
 
 
 class EdgeCase(unittest.TestCase):

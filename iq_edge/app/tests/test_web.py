@@ -8,7 +8,7 @@ from http.client import HTTPConnection
 from unittest import mock
 from urllib.parse import urlencode
 
-from iq_edge import prefs, ready, web
+from iq_edge import prefs, ready, voice, voice_http, web
 from iq_edge.center import Center
 from tests.fakes import EdgeCase
 
@@ -172,6 +172,147 @@ class BriefingTests(WebCase):
             self.assertIn('Escolha o alto-falante e o motor de voz', self.call('POST', '/falar', {'csrf': self.token(html)})[1])
         with mock.patch.object(prefs, 'speak_now', return_value=(True, 'Um instante.')):
             self.assertIn('Falando o Bom dia', self.call('POST', '/falar', {'csrf': self.token(html)})[1])
+
+
+class AssistantTests(WebCase):
+    """0.2.5: the Assistente page (the voice router): with the router off it says so and which options turn it on; with it running, what
+    to type in the integration, the password only after the button, the mode, the kind of agent (never its address) and the counters;
+    never a word of a request."""
+
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ, {'IQ_VOICE_HOSTNAME': 'abc123-iq-edge', 'IQ_VOICE_PORT': '8098', 'IQ_VOICE_AGENT': 'conversation.iq_assistant'})
+        env.start()
+        self.addCleanup(env.stop)
+        self.edge.pair('123456')
+        self.router = voice.Router(self.edge)
+        self.app.voice = self.router
+        self.password = voice_http.password()
+
+    def test_with_the_router_off_the_page_says_so_and_shows_nothing_of_it(self):
+        self.app.voice = None
+        os.environ.pop('IQ_VOICE_AGENT')  # no voice option at all
+        link = f'<a href="{INGRESS}/assistente">Assistente</a>'
+        self.assertIn(link, self.call('GET', '/')[1])  # the section is always there
+        self.assertIn('>Assistant</a>', self.call('GET', '/', headers={'Accept-Language': 'en'})[1])
+        status, html, _ = self.call('GET', '/assistente')
+        self.assertEqual(status, 200)
+        self.assertIn('O roteador de voz está desligado', html)
+        for option in ('voice_agent', 'voice_agent_url', 'voice_agent_user', 'voice_agent_password', 'Só voice_route não liga o roteador'):
+            self.assertIn(option, html)
+        for hidden in ('/v1/conversation', 'abc123-iq-edge', 'Mostrar a senha', 'Usuário', 'Foram ao assistente', 'Tempo médio', self.password):
+            self.assertNotIn(hidden, html)
+        english = self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1]
+        self.assertIn('The voice router is off.', english)
+        self.assertIn('voice_agent_url', english)
+        self.assertIn('voice_route alone does not turn the router on', english)
+        self.assertEqual(self.call('GET', '/assistente.js')[0], 404)
+        self.assertEqual(self.call('POST', '/assistente/senha', {'csrf': self.app.csrf('u-123')})[0], 404)  # there is no password to show
+        os.environ['IQ_VOICE_AGENT_URL'] = 'http://agent.local:5000/hook-secreto'  # options filled in, but the port did not open
+        html = self.call('GET', '/assistente')[1]
+        self.assertIn('não abriu a porta 8098', html)
+        self.assertNotIn('desligado', html)
+        self.assertIn('did not open port 8098', self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1])
+        for secret in ('agent.local', 'hook-secreto'):
+            self.assertNotIn(secret, html)
+
+    def test_the_page_shows_the_address_user_mode_and_agent_but_not_the_password(self):
+        status, html, answer = self.call('GET', '/assistente')
+        self.assertEqual(status, 200)
+        self.assertIn('<dd class="text">http://abc123-iq-edge:8098/v1/conversation</dd>', html)
+        self.assertIn('<dt>Usuário</dt><dd>iq</dd>', html)
+        self.assertIn('Ligado: o centro decide', html)
+        self.assertIn('<dt>Assistente escolhido</dt><dd>conversation.iq_assistant</dd>', html)
+        self.assertIn(f'action="{INGRESS}/assistente/senha"', html)
+        self.assertIn('Mostrar a senha', html)
+        self.assertNotIn(self.password, html)  # not until the button
+        self.assertNotIn('<script', html)
+        self.assertIn("script-src 'self'", answer.getheader('Content-Security-Policy'))
+        self.assertIn("default-src 'none'", answer.getheader('Content-Security-Policy'))
+
+    def test_the_button_reveals_the_password_with_a_copy_button(self):
+        html = self.call('GET', '/assistente')[1]
+        token = self.token(html)
+        self.assertEqual(self.call('POST', '/assistente/senha', {})[0], 403)  # no token
+        self.assertEqual(self.call('POST', '/assistente/senha', {'csrf': token}, {'X-Remote-User-Id': 'someone-else'})[0], 403)
+        status, html, answer = self.call('POST', '/assistente/senha', {'csrf': token})
+        self.assertEqual(status, 200)
+        self.assertIn(f'<input id="voice-password" value="{self.password}" readonly', html)
+        self.assertIn('data-copy="voice-password" data-done="Copiado">Copiar</button>', html)
+        self.assertIn(f'<script src="{INGRESS}/assistente.js"></script>', html)
+        self.assertEqual(answer.getheader('Cache-Control'), 'no-store')
+        self.assertNotIn(self.password, self.call('GET', '/assistente')[1])  # the next visit hides it again
+        status, script, answer = self.call('GET', '/assistente.js')
+        self.assertEqual((status, answer.getheader('Content-Type')), (200, 'text/javascript; charset=utf-8'))
+        self.assertIn('data-copy', script)
+        self.assertIn('navigator.clipboard', script)
+        self.assertIn('execCommand', script)  # the fallback when the page is not a secure context
+        self.assertNotIn(self.password, script)
+        english = self.call('POST', '/assistente/senha', {'csrf': token}, {'Accept-Language': 'en'})[1]
+        self.assertIn('data-done="Copied">Copy</button>', english)
+
+    def test_the_counters_and_the_modes(self):
+        self.ha.conversation_answers['conversation.iq_assistant'] = (200, {'response': {'response_type': 'query_answer',
+                                                                                         'speech': {'plain': {'speech': 'Oi.'}}}, 'conversation_id': 'c1'})
+        self.center.route_answer = (200, {'route': 'agent', 'category': 'chat', 'sensitive': False, 'engine': 'jev'}, {})
+        word = 'confidencial-xpto-123'
+        self.router.handle(f'{word} ligar', 'pt')
+        self.center.route_answer = (500, {}, {})
+        self.router.handle(f'{word} desligar', 'pt')
+        html = self.call('GET', '/assistente')[1]
+        self.assertIn('<dt>Foram ao assistente local</dt><dd>0</dd>', html)
+        self.assertIn('<dt>Foram ao assistente</dt><dd>1</dd>', html)
+        self.assertIn('<dt>Plano B (centro ou assistente local sem resposta)</dt><dd>1</dd>', html)
+        self.assertIn('<dt>Sem resposta de ninguém</dt><dd>0</dd>', html)
+        self.assertRegex(html, r'<dt>Tempo médio da consulta ao centro</dt><dd>\d+ ms</dd>')
+        self.assertIn('<dt>Último problema</dt><dd>center:http_500</dd>', html)
+        self.assertNotIn(word, html)  # never a word of a request
+        os.environ['IQ_VOICE_ROUTE'] = 'observe'
+        html = self.call('GET', '/assistente')[1]
+        self.assertIn('Observando: tudo vai ao assistente', html)
+        self.assertIn('Decisões do centro (só observadas)', html)
+        os.environ['IQ_VOICE_ROUTE'] = 'off'
+        html = self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1]
+        self.assertIn('Off: everything goes to the assistant', html)
+        self.assertIn('<dt>Went to the local assistant</dt><dd>0</dd>', html)
+        self.assertNotIn('Center decisions', html)
+
+    def test_an_agent_by_address_is_named_by_its_kind_never_by_its_address(self):
+        os.environ.update({'IQ_VOICE_AGENT_URL': 'http://agente-secreto.local:5000/caminho-secreto?token=chave-secreta',
+                           'IQ_VOICE_AGENT_USER': 'usuario-secreto', 'IQ_VOICE_AGENT_PASSWORD': 'senha-secreta'})
+        token = self.token(self.call('GET', '/assistente')[1])
+        pages = [self.call('GET', '/assistente')[1], self.call('POST', '/assistente/senha', {'csrf': token})[1],
+                 self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1]]
+        self.assertIn('<dt>Assistente escolhido</dt><dd>agente por endereço</dd>', pages[0])
+        self.assertIn('<dt>Chosen assistant</dt><dd>agent by address</dd>', pages[2])
+        for html in pages:
+            self.assertNotIn('conversation.iq_assistant', html)  # the address wins over the entity
+            for secret in ('agente-secreto', 'caminho-secreto', 'chave-secreta', 'usuario-secreto', 'senha-secreta', ':5000'):
+                self.assertNotIn(secret, html)
+        self.assertIn(self.password, pages[1])  # (the router's own password, after the button, is what the page is for)
+        os.environ['IQ_VOICE_AGENT_URL'] = 'ftp://usuario-secreto:senha-secreta@agente-secreto.local/x'  # refused, and still not shown
+        html = self.call('GET', '/assistente')[1]
+        self.assertIn('<dt>Assistente escolhido</dt><dd>agente por endereço (endereço recusado)</dd>', html)
+        self.assertIn('agent by address (address refused)', self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1])
+        for secret in ('agente-secreto', 'usuario-secreto', 'senha-secreta'):
+            self.assertNotIn(secret, html)
+
+    def test_no_agent_and_no_calls_yet(self):
+        os.environ.pop('IQ_VOICE_AGENT')
+        html = self.call('GET', '/assistente')[1]
+        self.assertIn('nenhum (opções voice_agent ou voice_agent_url)', html)
+        self.assertIn('<dt>Tempo médio da consulta ao centro</dt><dd>—</dd>', html)
+        self.assertNotIn('Último problema', html)
+
+    def test_the_other_pages_do_not_depend_on_the_router(self):
+        """The Estado and Bom dia pages are the same with the router on or off, and both carry the Assistente link."""
+        self.app.voice = None
+        before = [self.call('GET', path)[1] for path in ('/', '/bom-dia')]
+        self.app.voice = self.router
+        after = [self.call('GET', path)[1] for path in ('/', '/bom-dia')]
+        self.assertEqual(before, after)
+        for html in after:
+            self.assertIn(f'<a href="{INGRESS}/assistente">Assistente</a>', html)
 
 
 if __name__ == '__main__':

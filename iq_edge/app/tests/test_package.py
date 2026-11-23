@@ -1,5 +1,5 @@
-"""The add-on's package as the Supervisor reads it: config.yaml (the same version as the code, ingress on 8099, Core API only,
-amd64 + aarch64, the two options), the Dockerfile (a fixed base image tag, no build.yaml), repository.yaml and the files a person sees."""
+"""The add-on's package as the Supervisor reads it: config.yaml (the same version as the code, ingress on 8099, Core API only, the
+voice router's port 8098 not published on the host, amd64 + aarch64, the options), the Dockerfile (a fixed base image tag, no build.yaml), repository.yaml and the files a person sees."""
 import os
 import re
 import unittest
@@ -24,11 +24,23 @@ class PackageTests(unittest.TestCase):
         self.assertEqual((config['init'], config['ingress'], config['ingress_port'], config['panel_title'], config['panel_admin']),
                          (False, True, 8099, 'IQ', False))
         self.assertTrue(config['homeassistant_api'])
-        for key in ('hassio_api', 'host_network', 'privileged', 'full_access', 'ports', 'docker_api'):
+        for key in ('hassio_api', 'host_network', 'privileged', 'full_access', 'docker_api'):
             self.assertNotIn(key, config)  # nothing more than the Core API
+        # 0.2.5: the voice router's port for Home Assistant Core, on the internal network; null = NOT published on the host by default
+        self.assertEqual(config['ports'], {'8098/tcp': None})
+        self.assertEqual(settings.voice_port(), 8098)
         self.assertEqual(config['options'], {'center_url': 'https://business.iqautom8.com', 'pairing_code': ''})
         # lote A5: the Bom dia's options are all optional (out of `options`, so they stay unset until someone fills them in)
-        self.assertEqual(set(config['schema']), {'center_url', 'pairing_code'} | set(settings.BRIEFING_OPTIONS))
+        self.assertEqual(set(config['schema']), {'center_url', 'pairing_code'} | set(settings.BRIEFING_OPTIONS) | set(settings.VOICE_OPTIONS))
+        for key in settings.VOICE_OPTIONS:  # 0.2.5: optional, and out of `options`: empty = what the add-on did before
+            self.assertNotIn(key, config['options'])
+        self.assertEqual(config['schema']['voice_route'], 'list(' + '|'.join(settings.VOICE_MODES) + ')?')
+        agent = re.fullmatch(r'match\((.*)\)\?', config['schema']['voice_agent']).group(1)
+        self.assertEqual(re.compile(agent).pattern, '^conversation\\.[a-z0-9_]+$')
+        self.assertTrue(re.match(agent, 'conversation.iq_assistant'))
+        for wrong in ('light.sala', 'conversation.', 'conversation.A', 'conversation.a b', 'xconversation.a'):
+            self.assertIsNone(re.match(agent, wrong), wrong)
+            self.assertIsNone(settings.VOICE_AGENT.fullmatch(wrong), wrong)  # the code reads exactly what the schema lets in
         self.assertEqual(config['schema']['greet_names'], 'bool?')  # 0.2.2: a switch; 0.2.3: unset = off (no names)
         for key in settings.DAY_OPTIONS:  # 0.2.4: an optional list of weekday names (a one-element YAML list is the Supervisor's list form)
             self.assertEqual(config['schema'][key], ['list(' + '|'.join(settings.WEEKDAYS) + ')?'], key)
@@ -48,6 +60,44 @@ class PackageTests(unittest.TestCase):
             translations = yaml.safe_load((ADDON / 'translations' / f'{name}.yaml').read_text(encoding='utf-8'))['configuration']
             self.assertEqual(set(translations), set(config['schema']), name)
             self.assertTrue(all(item.get('name') and item.get('description') for item in translations.values()), name)
+            network = yaml.safe_load((ADDON / 'translations' / f'{name}.yaml').read_text(encoding='utf-8'))['network']
+            self.assertEqual(set(network), set(config['ports']), name)  # the port's description, in both languages
+            self.assertTrue(all(isinstance(text, str) and text for text in network.values()), name)
+
+    def test_the_agent_by_address_options(self):
+        """0.2.5 (lote J1b): voice_agent_url, voice_agent_user and voice_agent_password are optional (out of `options`), have the schema types
+        the Supervisor reads, sit in the options-to-environment map, in both translations and in the docs; no new version number."""
+        config = yaml.safe_load((ADDON / 'config.yaml').read_text(encoding='utf-8'))
+        self.assertEqual(config['version'], '0.2.5')
+        self.assertEqual(config['schema']['voice_agent_url'], 'url?')
+        self.assertEqual(config['schema']['voice_agent_user'], 'str(0,200)?')
+        self.assertEqual(config['schema']['voice_agent_password'], 'password?')  # the Supervisor hides it in the options form
+        env = {'voice_agent_url': 'IQ_VOICE_AGENT_URL', 'voice_agent_user': 'IQ_VOICE_AGENT_USER', 'voice_agent_password': 'IQ_VOICE_AGENT_PASSWORD'}
+        for option, variable in env.items():
+            self.assertEqual(settings.VOICE_OPTIONS[option], variable)
+            self.assertNotIn(option, config['options'])
+        self.assertEqual(config['ports'], {'8098/tcp': None})  # still not published on the host
+        for name, speaking in (('en', 'who is speaking'), ('pt-BR', 'quem está falando')):
+            translations = yaml.safe_load((ADDON / 'translations' / f'{name}.yaml').read_text(encoding='utf-8'))['configuration']
+            for option in ('voice_agent', 'voice_agent_url', 'voice_agent_user', 'voice_agent_password'):
+                self.assertTrue(translations[option]['name'] and translations[option]['description'], (name, option))
+            # the address keeps who is speaking and the device; the entity does not: both descriptions say it
+            self.assertIn(speaking, translations['voice_agent_url']['description'], name)
+            self.assertIn(speaking, translations['voice_agent']['description'], name)
+            self.assertIn('voice_agent', translations['voice_route']['description'], name)  # the mode works only with an agent set
+        docs = (ADDON / 'DOCS.md').read_text(encoding='utf-8')
+        changelog = (ADDON / 'CHANGELOG.md').read_text(encoding='utf-8')
+        entry = changelog[changelog.index('## 0.2.5'):changelog.index('## 0.2.4')]
+        self.assertEqual(changelog.count('## 0.2.5'), 1)
+        self.assertFalse(re.search(r'^## 0\.2\.[6-9]|^## 0\.[3-9]', changelog, re.M))  # the 0.2.5 entry grows; no new version
+        for option in ('voice_agent', 'voice_route', *env):
+            self.assertIn(f'`{option}`', docs, option)
+            self.assertIn(f'`{option}`', entry, option)
+        steps = ' '.join(docs[docs.index('### Casa que já usa a integração'):docs.index('### Casa cujo assistente é uma entidade')].split())
+        for text in ('Mantenha a entrada antiga', '`voice_agent_url`, `voice_agent_user` e `voice_agent_password`', 'Reinicie o add-on',
+                     'Mostrar a senha', 'entrada **nova**', 'Assistentes de voz', 'escolha de novo o agente antigo', 'depende de "este cômodo"'):
+            self.assertIn(text, steps, text)  # the owner's steps, and the known limit of the local path
+        self.assertIn('o roteador está desligado', ' '.join(docs.split()))
 
     def test_dockerfile_and_repository(self):
         dockerfile = (ADDON / 'Dockerfile').read_text(encoding='utf-8')
