@@ -64,6 +64,41 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(set(network), set(config['ports']), name)  # the port's description, in both languages
             self.assertTrue(all(isinstance(text, str) and text for text in network.values()), name)
 
+    def test_the_agent_by_address_options(self):
+        """0.2.5 (lote J1b): voice_agent_url, voice_agent_user and voice_agent_password are optional (out of `options`), have the schema types
+        the Supervisor reads, sit in the options-to-environment map, in both translations and in the docs; no new version number."""
+        config = yaml.safe_load((ADDON / 'config.yaml').read_text(encoding='utf-8'))
+        self.assertEqual(config['version'], '0.2.5')
+        self.assertEqual(config['schema']['voice_agent_url'], 'url?')
+        self.assertEqual(config['schema']['voice_agent_user'], 'str(0,200)?')
+        self.assertEqual(config['schema']['voice_agent_password'], 'password?')  # the Supervisor hides it in the options form
+        env = {'voice_agent_url': 'IQ_VOICE_AGENT_URL', 'voice_agent_user': 'IQ_VOICE_AGENT_USER', 'voice_agent_password': 'IQ_VOICE_AGENT_PASSWORD'}
+        for option, variable in env.items():
+            self.assertEqual(settings.VOICE_OPTIONS[option], variable)
+            self.assertNotIn(option, config['options'])
+        self.assertEqual(config['ports'], {'8098/tcp': None})  # still not published on the host
+        for name, speaking in (('en', 'who is speaking'), ('pt-BR', 'quem está falando')):
+            translations = yaml.safe_load((ADDON / 'translations' / f'{name}.yaml').read_text(encoding='utf-8'))['configuration']
+            for option in ('voice_agent', 'voice_agent_url', 'voice_agent_user', 'voice_agent_password'):
+                self.assertTrue(translations[option]['name'] and translations[option]['description'], (name, option))
+            # the address keeps who is speaking and the device; the entity does not: both descriptions say it
+            self.assertIn(speaking, translations['voice_agent_url']['description'], name)
+            self.assertIn(speaking, translations['voice_agent']['description'], name)
+            self.assertIn('voice_agent', translations['voice_route']['description'], name)  # the mode works only with an agent set
+        docs = (ADDON / 'DOCS.md').read_text(encoding='utf-8')
+        changelog = (ADDON / 'CHANGELOG.md').read_text(encoding='utf-8')
+        entry = changelog[changelog.index('## 0.2.5'):changelog.index('## 0.2.4')]
+        self.assertEqual(changelog.count('## 0.2.5'), 1)
+        self.assertFalse(re.search(r'^## 0\.2\.[6-9]|^## 0\.[3-9]', changelog, re.M))  # the 0.2.5 entry grows; no new version
+        for option in ('voice_agent', 'voice_route', *env):
+            self.assertIn(f'`{option}`', docs, option)
+            self.assertIn(f'`{option}`', entry, option)
+        steps = ' '.join(docs[docs.index('### Casa que já usa a integração'):docs.index('### Casa cujo assistente é uma entidade')].split())
+        for text in ('Mantenha a entrada antiga', '`voice_agent_url`, `voice_agent_user` e `voice_agent_password`', 'Reinicie o add-on',
+                     'Mostrar a senha', 'entrada **nova**', 'Assistentes de voz', 'escolha de novo o agente antigo', 'depende de "este cômodo"'):
+            self.assertIn(text, steps, text)  # the owner's steps, and the known limit of the local path
+        self.assertIn('o roteador está desligado', ' '.join(docs.split()))
+
     def test_dockerfile_and_repository(self):
         dockerfile = (ADDON / 'Dockerfile').read_text(encoding='utf-8')
         self.assertRegex(dockerfile, r'ARG BUILD_FROM=ghcr\.io/home-assistant/base-python:\d+\.\d+-alpine\d+\.\d+\n')

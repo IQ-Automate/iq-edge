@@ -9,17 +9,32 @@
 - A casa nunca fica sem assistente: sem pareamento, sem plataforma, com a plataforma lenta (2 segundos no máximo), com erro ou
   com resposta fora do formato, o pedido vai ao assistente. Se o assistente local não entender, o pedido também vai ao
   assistente. Sem assistente escolhido, o roteador responde em voz que não há assistente configurado.
+- Entrega fiel por endereço: três opções novas, `voice_agent_url` (o endereço do webhook do assistente antigo),
+  `voice_agent_user` e `voice_agent_password`. Com o endereço preenchido, o pedido vai ao assistente exatamente como o Home
+  Assistant o enviou (mesmos bytes, com `user_id`, `device_id`, `device_info` e as entidades expostas), com autenticação Basic só
+  quando há usuário e 90 segundos de limite. A resposta do assistente volta ao Home Assistant sem mudar (código, tipo e corpo).
+  Vale para todo caminho do assistente: modo `off`, modo `observe`, plataforma mandando ao assistente, plataforma sem resposta,
+  texto com mais de 500 caracteres e plano B do assistente local. O endereço vale mais que `voice_agent`.
+- O endereço só vale se for `http` ou `https`, sem usuário nem senha dentro e sem apontar para o próprio roteador. Endereço
+  recusado, assistente fora do ar, tempo esgotado ou erro 5xx viram uma frase falada e contam como falha. O endereço, o usuário, a
+  senha e o texto dos pedidos nunca vão ao registro.
 - Porta nova 8098, só na rede interna do Home Assistant (o Supervisor não a publica no aparelho), com usuário `iq` e uma senha
   que o add-on cria na primeira partida (`/data/voice.json`, só o add-on lê). Só aceita `POST /v1/conversation` com essa senha.
-- Duas opções novas, ambas opcionais: `voice_agent` (a entidade `conversation.*` que recebe os pedidos que não são simples) e
-  `voice_route` (`on`, `observe` ou `off`; vazio = `on`). Em `observe`, tudo vai ao assistente e a decisão da plataforma só é contada.
-- Aba nova **Assistente**: o endereço, o usuário e a senha (só depois do botão) para criar a entrada na integração, o modo, o
-  assistente escolhido e os números desde que o add-on iniciou (local, assistente, plano B, sem resposta e o tempo médio da
-  consulta à plataforma).
+  **A porta só abre, e o arquivo só nasce, quando `voice_agent` ou `voice_agent_url` está preenchida.**
+- Cinco opções novas, todas opcionais: `voice_agent` (a entidade `conversation.*` que recebe os pedidos que não são simples; só as
+  palavras chegam a ela, sem saber quem fala nem o aparelho), `voice_route` (`on`, `observe` ou `off`; vazio = `on`; sozinha, não
+  liga o roteador), `voice_agent_url`, `voice_agent_user` e `voice_agent_password`. Em `observe`, tudo vai ao assistente e a
+  decisão da plataforma só é contada.
+- Aba nova **Assistente**: com o roteador desligado, diz isso e quais opções da aba Configuração ligam. Com o roteador ligado,
+  mostra o endereço, o usuário e a senha (só depois do botão) para criar a entrada na integração, o modo, o tipo de assistente
+  (a entidade, ou só "agente por endereço", nunca o endereço) e os números desde que o add-on iniciou (local, assistente, plano B,
+  sem resposta e o tempo médio da consulta à plataforma).
 - O texto dos pedidos nunca é guardado: nem no registro, nem na aba, nem na memória depois da resposta.
-- **O que muda ao atualizar:** nada do que a casa usa hoje. O add-on abre a porta 8098 e cria a senha, mas só recebe pedidos
-  depois que alguém cria a entrada na integração (veja o DOCS). Com as duas opções vazias, o Bom dia e tudo o que já existia ficam
-  exatamente como eram.
+- Limite conhecido: o caminho local não sabe de qual aparelho nem de qual cômodo veio a frase; um pedido que depende de "este
+  cômodo" cai no assistente.
+- **O que muda ao atualizar:** com as cinco opções de voz vazias, nada muda: o add-on não abre a porta 8098, não cria
+  `/data/voice.json` e se comporta como a 0.2.4 (a aba só ganha a seção Assistente, que diz que o roteador está desligado). Para
+  ligar numa casa que já usa a integração, veja os passos no DOCS (**Casa que já usa a integração**).
 
 ## 0.2.4
 

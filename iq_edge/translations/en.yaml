@@ -48,10 +48,19 @@ configuration:
     name: Recycling days
     description: The weekdays of the recyclable trash. On a marked day, every good morning ends with a reminder to take it out. Empty (default) means no reminder.
   voice_agent:
-    name: Voice router — assistant
-    description: The conversation.* entity that gets the requests that are not simple (the assistant the home used before). Empty (default) = the router says there is no assistant configured. Never choose the router's own agent.
+    name: Voice router — assistant by entity
+    description: The conversation.* entity of Home Assistant that gets the requests that are not simple. Only the words of the request reach it. It does not know who is speaking or from which device. For an assistant that the integration Webhook Conversation uses today, fill in voice_agent_url instead. Never choose the router's own agent. Empty (default) = not used.
   voice_route:
     name: Voice router — mode
-    description: "on: the platform decides where each request goes (default when empty). observe: everything goes to the assistant, but the platform is still asked and its decision is counted. off: everything goes to the assistant and the platform is never asked."
+    description: "Works only when voice_agent or voice_agent_url is filled in (the router does not run without one). on: the platform decides where each request goes (default when empty). observe: everything goes to the assistant, but the platform is still asked and its decision is counted. off: everything goes to the assistant and the platform is never asked."
+  voice_agent_url:
+    name: Voice router — assistant by address
+    description: The webhook address of the assistant the home used before. Type the same address as its old entry in the integration Webhook Conversation (http or https, with no user or password inside). The router hands over the request untouched, so the assistant keeps who is speaking and from which device. If this is filled in, voice_agent is not used. Empty (default) = not used.
+  voice_agent_user:
+    name: Voice router — assistant user
+    description: The user for the address above, if the assistant asks for one. Type the same user as in the old entry. Empty (default) = no login.
+  voice_agent_password:
+    name: Voice router — assistant password
+    description: The password for the address above. Type the same password as in the old entry. Empty (default) = none.
 network:
   8098/tcp: "Voice router for Home Assistant (webhook-conversation). Not needed on the host: Home Assistant reaches it inside."

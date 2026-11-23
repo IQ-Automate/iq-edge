@@ -15,7 +15,8 @@ panel_icon: mdi:home-automation
 panel_title: IQ
 panel_admin: false
 homeassistant_api: true
-# 0.2.5: the voice router listens here for Home Assistant Core, on the internal network (http://<hostname>:8098); null = not published on the host
+# 0.2.5: the voice router listens here for Home Assistant Core, on the internal network (http://<hostname>:8098); null = not published on the host.
+# It only starts when voice_agent or voice_agent_url is set; with every voice option empty the add-on is what 0.2.4 was.
 ports:
   8098/tcp: null
 options:
@@ -42,3 +43,6 @@ schema:
     - "list(monday|tuesday|wednesday|thursday|friday|saturday|sunday)?"
   voice_agent: 'match(^conversation\.[a-z0-9_]+$)?'
   voice_route: list(on|observe|off)?
+  voice_agent_url: url?
+  voice_agent_user: str(0,200)?
+  voice_agent_password: password?
