@@ -1,7 +1,8 @@
 """The add-on's side of contract v2 with the IQ platform (the center's docs/EDGE_CONTRACT.md): pairing with the 6-digit code, the
 long-poll for jobs (HTTPS going OUT of the home; nothing comes in), running each job, the heartbeat every 5 min, the credential's
 rotation every 30 days, unpairing, the client's Bom dia sent to the center and the Bom dia's text written by the center's AI
-(briefing-compose, lote A5: only data goes, the key and the prompt stay in the center).
+(briefing-compose, lote A5: only data goes, the key and the prompt stay in the center). Since 0.2.5 (lote J1b) the voice router asks
+voice-route where a spoken request must go (local assistant or the home's agent): one try, about 2 s in all, any failure = NoRoute.
 
 The credential (32 random bytes from the center, delivered once) lives only in /data/edge.json (mode 600) and in the Authorization
 header of each call; never in a log, the tab or an answer. A code the center refused is never sent again by itself (it would spend
@@ -9,6 +10,7 @@ the code's 5 attempts): a new code (options or the tab) is needed. After pairing
 API /addons/self/options). Errors back off 1 → 60 s; 401 = the owner (or the tab) unpaired it: the credential is forgotten."""
 import hashlib
 import logging
+import queue
 import socket
 import threading
 import time
@@ -26,6 +28,9 @@ BACKOFF = (1, 2, 4, 8, 15, 30, 60)
 MAX_RESULT = 5 * 1024 * 1024
 COMPOSE_TIMEOUT = 45
 COMPOSE_ERRORS = {401: 'revoked', 410: 'home_deleted', 413: 'too_big', 422: 'invalid', 429: 'rate', 502: 'ai_failed', 503: 'no_key'}
+ROUTE_BUDGET = 2.0  # seconds, the whole voice-route call (connect + answer): the person is waiting for the house to answer
+ROUTE_ERRORS = {401: 'revoked', 410: 'home_deleted', 413: 'too_big', 422: 'invalid', 429: 'rate'}
+ROUTE_CATEGORIES = ('simple', 'compound', 'config', 'chat', 'unknown')
 logger = logging.getLogger('iq_edge.center')
 
 
@@ -42,6 +47,15 @@ class CenterError(Exception):
 class NoAI(Exception):
     """The center did not write the Bom dia (not paired, offline, no key, limit, the model failed...): the home speaks the rule text.
     `reason` is a short code, never data."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+class NoRoute(Exception):
+    """The center did not say where a spoken request goes (not paired, offline, slow, refused, a malformed answer...): the router
+    sends it to the home's agent. `reason` is a short code, never data."""
 
     def __init__(self, reason):
         self.reason = reason
@@ -75,6 +89,8 @@ class Center:
         self.ai_session = requests.Session()  # the Bom dia asks from other threads while the loop holds a long-poll
         self.ai_session.trust_env = False
         self.ai = {'ok': None, 'at': None, 'reason': ''}  # the last briefing-compose (the tab shows it)
+        self.route_session = requests.Session()  # voice-route: its own, called from the voice router's threads
+        self.route_session.trust_env = False
         self._local = threading.local()  # a preview job's deadline (the center gives up on it after that)
 
     # ---- the credential file ----
@@ -272,6 +288,45 @@ class Center:
     def _ai_status(self, ok, reason=''):
         with self.lock:
             self.ai = {'ok': ok, 'at': _now_iso(), 'reason': reason}
+
+    # ---- where a spoken request goes (voice-route, lote J1b) ----
+
+    def voice_route(self, text, language, budget=None):
+        """POST voice-route (contract v2) -> {"route": "local"|"agent", "category", "sensitive", "confidence", "engine", "reason", "ms"}.
+        One try and `budget` seconds in all (the person is waiting): the call runs in its own thread and is left behind when it is
+        late (its own connect/read timeouts end it). Any failure -> NoRoute(reason): the router sends the request to the agent.
+        The text goes only in the body of this call: never in a log, a counter or an error. Not for text over 500 characters
+        (the caller checks). A `sensitive` answer never stays local."""
+        if not self.paired():
+            raise NoRoute('unpaired')
+        budget = ROUTE_BUDGET if budget is None else budget
+        body = {'text': str(text), 'language': str(language or 'pt')[:16]}
+        done = queue.Queue(maxsize=1)
+
+        def ask():
+            try:
+                done.put(self._request('POST', 'voice-route', body, timeout=(min(1.0, budget), budget), session=self.route_session))
+            except Revoked:
+                done.put((401, None, None))
+            except requests.Timeout:
+                done.put(('timeout', None, None))
+            except Exception:  # offline, and anything unexpected: the request still goes to the agent
+                done.put(('offline', None, None))
+        threading.Thread(target=ask, name='iq-edge-route', daemon=True).start()
+        try:
+            status, data, _ = done.get(timeout=budget)
+        except queue.Empty:
+            raise NoRoute('timeout') from None
+        if status != 200:
+            raise NoRoute(status if isinstance(status, str) else ROUTE_ERRORS.get(status, f'http_{status}'))
+        route = data.get('route') if isinstance(data, dict) else None
+        if route not in ('local', 'agent'):
+            raise NoRoute('bad_response')
+        sensitive = data.get('sensitive') is True
+        category = data.get('category') if data.get('category') in ROUTE_CATEGORIES else 'unknown'
+        engine = data.get('engine') if data.get('engine') in ('jev', 'simulated', 'none') else 'none'
+        return {'route': 'agent' if sensitive else route, 'category': category, 'sensitive': sensitive, 'engine': engine,
+                'reason': str(data.get('reason') or '')[:40]}
 
     # ---- heartbeat, rotation, the client's Bom dia, unpair ----
 

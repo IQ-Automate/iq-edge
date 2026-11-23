@@ -13,15 +13,19 @@ Outside Home Assistant (tests, a developer's machine) the same code runs with en
   IQ_SUPERVISOR_URL           instead of http://supervisor (only used to clear the code from the options after pairing)
   IQ_INGRESS_PORT, IQ_INGRESS_PEERS   the tab's port (8099) and who may open it (only 172.30.32.2, the Supervisor; tests only)
   IQ_HA_WS_URL                instead of ws://supervisor/core/websocket (Home Assistant's event iq_bom_dia, events.py)
+  IQ_VOICE_PORT, IQ_VOICE_HOSTNAME    the voice router's port (8098) and the host name shown on the tab (default: the container's)
 Nothing here is ever logged.
 
 The Bom dia's options (lote A5, all optional in config.yaml) become, at start, the IQ_BRIEFING_* variables briefing.py and
-schedule.py read (BRIEFING_OPTIONS); an option left empty sets nothing (the code's default)."""
+schedule.py read (BRIEFING_OPTIONS); an option left empty sets nothing (the code's default). The voice router's two options (lote J1b,
+0.2.5, VOICE_OPTIONS) work the same way: IQ_VOICE_AGENT and IQ_VOICE_ROUTE; both empty = the router asks the center and says
+there is no assistant configured (voice.py)."""
 import json
 import os
 import platform
 import re
 import secrets
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -133,6 +137,57 @@ def apply_briefing_options():
         os.environ[variable] = str(value).strip()[:200]
         applied.append(option)
     return applied
+
+
+VOICE_OPTIONS = {
+    'voice_agent': 'IQ_VOICE_AGENT',
+    'voice_route': 'IQ_VOICE_ROUTE',
+}
+VOICE_AGENT = re.compile(r'conversation\.[a-z0-9_]{1,200}')
+VOICE_MODES = ('on', 'observe', 'off')
+
+
+def apply_voice_options():
+    """At start: each voice router option that is set AND valid becomes its IQ_VOICE_* variable (an entity id that is not a
+    `conversation.*`, or a mode that is not on/observe/off, is ignored: the default stands). Returns the option names applied (for
+    the log; never the values)."""
+    data = options()
+    applied = []
+    for option, variable in VOICE_OPTIONS.items():
+        value = data.get(option)
+        value = value.strip().lower() if isinstance(value, str) else ''
+        if option == 'voice_agent' and not VOICE_AGENT.fullmatch(value):
+            continue
+        if option == 'voice_route' and value not in VOICE_MODES:
+            continue
+        os.environ[variable] = value
+        applied.append(option)
+    return applied
+
+
+def voice_agent():
+    """The conversation entity that gets the requests that are not simple; '' = none configured."""
+    value = os.getenv('IQ_VOICE_AGENT', '').strip().lower()
+    return value if VOICE_AGENT.fullmatch(value) else ''
+
+
+def voice_route_mode():
+    """'on' (the center decides; also when empty), 'observe' (asks the center, always the agent) or 'off' (never asks the center)."""
+    value = os.getenv('IQ_VOICE_ROUTE', '').strip().lower()
+    return value if value in VOICE_MODES else 'on'
+
+
+def voice_port():
+    try:
+        return int(os.getenv('IQ_VOICE_PORT', '8098'))
+    except ValueError:
+        return 8098
+
+
+def addon_hostname():
+    """The add-on's name on the Supervisor's internal network (the Supervisor sets it as the container's host name): what Home
+    Assistant Core types in the integration's address."""
+    return (os.getenv('IQ_VOICE_HOSTNAME') or socket.gethostname()).strip()[:100]
 
 
 def center_url():
