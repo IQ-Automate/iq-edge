@@ -1,6 +1,6 @@
 """A FAKE IQ center (contract v2, in memory) and a FAKE Home Assistant (REST API through the 'Supervisor'), each an http.server in a
 thread on 127.0.0.1. Nothing here reaches the internet. The fake HA also answers /addons/self/options (the Supervisor) and /rss
-(a news feed), so the add-on's whole path runs locally."""
+(a news feed), so the add-on's whole path runs locally. FakeAgent is the old assistant's webhook (0.2.5, lote J1b)."""
 import json
 import os
 import re
@@ -272,6 +272,44 @@ class FakeCenter(_Server):
     def queue(self, kind, request, job_id='0f0f0f0f-0000-4000-8000-000000000001', deadline='2099-01-01T00:00:00+00:00'):
         self.jobs.append({'id': job_id, 'kind': kind, 'request': request, 'deadline': deadline, 'contract': 2})
         return job_id
+
+
+class FakeAgent(_Server):
+    """An old assistant's webhook, as the integration "webhook-conversation" talks to it: every POST kept (path, the headers as sent,
+    the RAW body bytes), then answered with `answer` = (status, content type or None, body bytes), or a function of the kept request
+    returning that, after `delay` seconds."""
+
+    def __init__(self):
+        self.requests, self.delay = [], 0
+        self.answer = (200, 'application/json', b'{"output": "Resposta do agente antigo."}')
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                kept = {'path': self.path, 'headers': dict(self.headers), 'body': body}
+                fake.requests.append(kept)
+                if fake.delay:
+                    time.sleep(fake.delay)
+                status, content_type, data = fake.answer(kept) if callable(fake.answer) else fake.answer
+                try:  # a slow answer: the add-on may have given up and closed the connection already
+                    self.send_response(status)
+                    if content_type:
+                        self.send_header('Content-Type', content_type)
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                except OSError:
+                    pass
+
+        self.start(Handler)
+
+    @property
+    def address(self):
+        return self.url + '/hook'
 
 
 class EdgeCase(unittest.TestCase):

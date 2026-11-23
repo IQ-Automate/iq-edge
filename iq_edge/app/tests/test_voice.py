@@ -1,6 +1,10 @@
 """The voice router (lote J1b, 0.2.5): the center's voice-route call (Center.voice_route) and the flow (voice.Router) with the FAKE
 center and the FAKE Home Assistant (its conversation API): local, the agent, the fallbacks, the three modes, no agent configured, the
-conversation ids, the counters and the rule that no word of a request is kept or logged."""
+conversation ids, the counters and the rule that no word of a request is kept or logged. An agent by ADDRESS (voice_agent_url): the request
+goes untouched, with Basic authentication only when a user is set, from every way into the agent; its answer comes back unchanged; an
+address that is refused, that points back at the router or that does not answer gives a spoken sentence; nothing of it is logged."""
+import base64
+import json
 import logging
 import os
 import time
@@ -10,10 +14,16 @@ from unittest import mock
 from iq_edge import center as center_module
 from iq_edge import settings, voice
 from iq_edge.center import Center, NoRoute
-from tests.fakes import EdgeCase, conversation_response
+from tests.fakes import EdgeCase, FakeAgent, conversation_response
 
 AGENT = 'conversation.iq_assistant'
 TEXT = 'acende a luz da sala de jantar'
+# a request as the integration "webhook-conversation" sends it, byte for byte (no spaces after the colons, an accent, an unknown key)
+BODY = ('{"conversation_id":"01K8Z","user_id":"u-7","user_name":"Franco","language":"pt-BR","agent_id":"conversation.iq_router",'
+        '"device_id":"dev-tablet","device_info":{"name":"Tablet da sala","manufacturer":"X","model":"Y"},'
+        '"messages":[{"role":"user","content":"antiga"}],"query":"acende a luz da sala de jantar",'
+        '"exposed_entities":"[{\\"entity_id\\":\\"light.sala\\",\\"name\\":\\"Sala\\"}]","system_prompt":"Você é o assistente.",'
+        '"stream":false,"novo_campo":{"a":[1, 2]}}\n').encode('utf-8')
 ROUTE = {'route': 'agent', 'category': 'compound', 'sensitive': False, 'confidence': 0.9, 'engine': 'jev', 'reason': 'test', 'ms': 12}
 
 
@@ -412,16 +422,288 @@ class StatsAndLogTests(VoiceCase):
         self.assertNoWords(word, TEXT)
 
 
+class AgentByAddressCase(VoiceCase):
+    """The old assistant's webhook (FakeAgent) as the router's agent; the center says `agent` unless a test says otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        self.agent = FakeAgent()
+        self.addCleanup(self.agent.stop)
+        os.environ['IQ_VOICE_HOSTNAME'] = 'abc123-iq-edge'
+        os.environ['IQ_VOICE_AGENT_URL'] = self.agent.address
+        self.center.route_answer = decision(route='agent')
+
+    def send(self, text=TEXT, language='pt-BR', raw=BODY):
+        return self.router.handle(text, language, 'in-1', 'conversation.iq_router', raw)
+
+    def last(self):
+        return self.agent.requests[-1]
+
+    def assertHandedOver(self, raw=BODY):
+        """Exactly one request reached the agent, with the bytes as they came, and Home Assistant's conversation API was not used."""
+        self.assertEqual([request['body'] for request in self.agent.requests], [raw])
+        self.assertEqual(self.agents(), [])
+
+
+class AgentByAddressTests(AgentByAddressCase):
+    def test_the_request_goes_untouched_and_the_answer_comes_back_unchanged(self):
+        answer = self.send()
+        self.assertEqual(answer, voice.Forwarded(200, 'application/json', b'{"output": "Resposta do agente antigo."}'))
+        self.assertEqual(self.last()['body'], BODY)  # byte for byte: the key order, the spaces, the accents and the unknown key
+        self.assertEqual(self.last()['headers']['Content-Type'], 'application/json')
+        for piece in (b'"user_id":"u-7"', b'"device_id":"dev-tablet"', b'"device_info"', b'"exposed_entities"', b'novo_campo'):
+            self.assertIn(piece, self.last()['body'])
+        self.assertEqual(self.ha.conversations, [])  # nothing went through Home Assistant's conversation API
+        stats = self.router.stats()
+        self.assertEqual((stats['agent'], stats['fallback'], stats['failed']), (1, 0, 0))
+        self.assertNoWords()
+
+    def test_the_path_and_the_query_of_the_address_are_kept(self):
+        os.environ['IQ_VOICE_AGENT_URL'] = self.agent.url + '/api/webhook/abc-123?x=1&y=2'
+        self.send()
+        self.assertEqual(self.last()['path'], '/api/webhook/abc-123?x=1&y=2')
+
+    def test_basic_authentication_only_when_a_user_is_set(self):
+        self.send()
+        self.assertNotIn('Authorization', self.last()['headers'])
+        os.environ['IQ_VOICE_AGENT_PASSWORD'] = 'senha-sem-usuario'  # a password alone is not a login
+        self.send()
+        self.assertNotIn('Authorization', self.last()['headers'])
+        os.environ['IQ_VOICE_AGENT_USER'] = 'franco'
+        self.send()
+        self.assertEqual(self.last()['headers']['Authorization'], 'Basic ' + base64.b64encode(b'franco:senha-sem-usuario').decode())
+        os.environ['IQ_VOICE_AGENT_PASSWORD'] = 'sénha: com espaço'  # what the integration itself sends for the same characters
+        self.send()
+        self.assertEqual(self.last()['headers']['Authorization'],
+                         'Basic ' + base64.b64encode('franco:sénha: com espaço'.encode('latin-1')).decode())
+        del os.environ['IQ_VOICE_AGENT_PASSWORD']
+        self.send()
+        self.assertEqual(self.last()['headers']['Authorization'], 'Basic ' + base64.b64encode(b'franco:').decode())
+        self.assertEqual([request['body'] for request in self.agent.requests], [BODY] * 5)
+
+    def test_the_answer_comes_back_unchanged(self):
+        ndjson = b'{"type":"begin"}\n{"type":"item","content":"Ol\xc3\xa1"}\n{"type":"end"}\n'
+        cases = ((200, 'application/json', b'{"output":"Oi"}'), (200, 'application/x-ndjson; charset=utf-8', ndjson),
+                 (200, None, b'sem tipo'), (200, 'text/plain; charset=iso-8859-1', 'olá'.encode('latin-1')),
+                 (201, 'application/json', b'{}'), (200, 'application/json', b''))
+        for status, content_type, body in cases:
+            self.agent.answer = (status, content_type, body)
+            self.assertEqual(self.send(), voice.Forwarded(status, content_type, body))
+        self.assertEqual(self.router.stats()['agent'], len(cases))
+
+    def test_a_4xx_or_3xx_of_the_agent_is_handed_back_as_it_is_and_counts_as_a_failure(self):
+        for status in (400, 401, 404, 422, 302):
+            self.agent.answer = (status, 'application/json', b'{"error": "x"}')
+            self.assertEqual(self.send(), voice.Forwarded(status, 'application/json', b'{"error": "x"}'))
+            self.assertEqual(self.router.stats()['problem'], f'agent:http_{status}')
+        stats = self.router.stats()
+        self.assertEqual((stats['failed'], stats['agent'], stats['fallback']), (5, 0, 0))
+        self.assertEqual(len(self.agent.requests), 5)  # a redirect is not followed
+
+    # ---- every way into the agent ends at the address ----
+
+    def test_mode_off(self):
+        self.options(mode='off')
+        self.assertIsInstance(self.send(), voice.Forwarded)
+        self.assertHandedOver()
+        self.assertEqual(self.center.routed, [])
+        self.assertEqual(self.router.stats()['agent'], 1)
+
+    def test_mode_observe(self):
+        self.options(mode='observe')
+        self.center.route_answer = decision(route='local', category='simple')
+        self.assertIsInstance(self.send(), voice.Forwarded)
+        self.assertHandedOver()  # the local assistant is never asked
+        self.assertEqual(self.ha.conversations, [])
+        stats = self.router.stats()
+        self.assertEqual((stats['observed_local'], stats['agent'], stats['fallback']), (1, 1, 0))
+
+    def test_the_center_says_agent(self):
+        self.assertIsInstance(self.send(), voice.Forwarded)
+        self.assertHandedOver()
+        self.assertEqual(len(self.center.routed), 1)
+        self.assertEqual(self.router.stats()['agent'], 1)
+
+    def test_the_center_that_cannot_answer(self):
+        self.center.route_answer = (500, {'error': 'x'}, {})
+        self.assertIsInstance(self.send(), voice.Forwarded)
+        self.center.stop()  # and a center that is gone
+        self.assertIsInstance(self.send(), voice.Forwarded)
+        self.assertEqual([request['body'] for request in self.agent.requests], [BODY, BODY])
+        stats = self.router.stats()
+        self.assertEqual((stats['fallback'], stats['agent'], stats['center_errors']), (2, 0, 2))
+
+    def test_a_home_that_is_not_paired(self):
+        self.edge.forget()
+        self.assertIsInstance(self.send(), voice.Forwarded)
+        self.assertHandedOver()
+        self.assertEqual((self.center.routed, self.router.stats()['fallback']), ([], 1))
+
+    def test_a_text_over_500_characters(self):
+        long_text = 'a' * (voice.MAX_ROUTE_TEXT + 1)
+        raw = json.dumps({'query': long_text, 'user_id': 'u-7', 'device_id': 'dev-tablet'}, indent=1).encode('utf-8')
+        self.assertIsInstance(self.send(long_text, raw=raw), voice.Forwarded)
+        self.assertHandedOver(raw)
+        self.assertEqual(self.center.routed, [])  # the center is not even asked
+
+    def test_the_local_assistant_that_does_not_understand(self):
+        self.center.route_answer = decision(route='local', category='simple')
+        self.assertIsInstance(self.send(), voice.Forwarded)  # the fake's default: the local assistant answers an error response
+        self.assertEqual([request['body'] for request in self.agent.requests], [BODY])
+        self.assertEqual(self.agents(), ['conversation.home_assistant'])  # only the local assistant went through Home Assistant
+        stats = self.router.stats()
+        self.assertEqual((stats['fallback'], stats['agent'], stats['local']), (1, 0, 0))
+        self.assertEqual(stats['problem'], 'local:error_response')
+
+    def test_the_local_assistant_that_understands_never_reaches_the_agent(self):
+        self.center.route_answer = decision(route='local', category='simple')
+        self.ha.conversation_answers['conversation.home_assistant'] = (200, conversation_response('Luz acesa.', 'action_done'))
+        self.assertEqual(self.send(), 'Luz acesa.')
+        self.assertEqual(self.agent.requests, [])
+
+    def test_the_address_wins_over_the_entity(self):
+        self.options(agent=AGENT)
+        self.assertIsInstance(self.send(), voice.Forwarded)
+        self.assertHandedOver()
+        self.assertEqual(self.ha.conversations, [])
+        os.environ['IQ_VOICE_AGENT_URL'] = ''  # without the address the entity answers
+        self.assertEqual(self.send(), 'Resposta do assistente.')
+        self.assertEqual(self.agents(), [AGENT])
+
+    def test_without_the_bytes_of_the_request_only_the_entity_can_answer(self):
+        self.assertIn('sem assistente configurado', self.router.handle(TEXT, 'pt'))  # (the door always has the bytes)
+        self.options(agent=AGENT)
+        self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+        self.assertEqual(self.agent.requests, [])
+
+    # ---- an address that must not be called ----
+
+    def test_an_address_that_points_back_at_the_router_is_refused(self):
+        port = self.agent.server.server_port
+        os.environ['IQ_VOICE_PORT'] = str(port)  # the fake agent stands where the router's own door would be
+        self.options(agent=AGENT)  # the entity is not a way out either
+        urls = (f'http://127.0.0.1:{port}/hook', f'http://localhost:{port}/hook', f'http://[::1]:{port}/hook', f'http://0.0.0.0:{port}/',
+                f'http://[::ffff:127.0.0.1]:{port}/', f'http://127.0.0.1:{port}', 'http://abc123-iq-edge:8098/v1/conversation',
+                'http://ABC123-iq-edge:9999/', 'https://abc123-iq-edge.local.hass.io/')
+        for url in urls:
+            os.environ['IQ_VOICE_AGENT_URL'] = url
+            self.assertEqual(settings.voice_agent_url_state(), ('', 'itself'), url)
+            self.assertEqual(self.send(), voice.spoken('loop', 'pt-BR'), url)
+        self.assertEqual(self.send(language='en-US'), voice.spoken('loop', 'en-US'))
+        self.assertEqual((self.agent.requests, self.ha.conversations), ([], []))
+        stats = self.router.stats()
+        self.assertEqual((stats['failed'], stats['problem']), (len(urls) + 1, 'agent:itself'))
+        os.environ['IQ_VOICE_PORT'] = '8098'  # another port on this machine is another service: the same address now goes through
+        os.environ['IQ_VOICE_AGENT_URL'] = self.agent.address
+        self.assertIsInstance(self.send(), voice.Forwarded)
+
+    def test_a_bad_address_is_refused(self):
+        self.options(agent=AGENT)  # a set address is never replaced by the entity: the person must see it is wrong
+        bad = ('ftp://host/hook', 'file:///etc/passwd', 'javascript:alert(1)', 'agent.local:5000/hook', 'agent.local/hook',
+               'http://user:pw@host/hook', 'http://user@host/hook', 'http://:pw@host/hook', 'http://@host/hook', 'http://', 'http:///hook',
+               'http://host:99999/hook', 'http://host:0/hook', 'http://host/ho ok', 'http://host/a\nb', 'http://' + 'a' * 2000)
+        for url in bad:
+            os.environ['IQ_VOICE_AGENT_URL'] = url
+            self.assertEqual(settings.voice_agent_url_state(), ('', 'invalid'), url)
+            self.assertEqual(self.send(), voice.spoken('no_agent', 'pt-BR'), url)
+        self.assertEqual(self.send(language='en'), voice.spoken('no_agent', 'en'))
+        self.assertEqual((self.agent.requests, self.ha.conversations), ([], []))
+        stats = self.router.stats()
+        self.assertEqual((stats['failed'], stats['problem']), (len(bad) + 1, 'agent:bad_url'))
+
+    def test_the_usable_addresses(self):
+        for url in ('http://host:5000/hook', 'https://host/hook?token=1', 'HTTP://Host:80/x', 'http://192.168.1.50:8123/api/webhook/abc',
+                    'http://[fd00::1]:8123/x', 'http://agent.local/a@b', 'http://localhost:9000/hook', 'http://127.0.0.1/hook'):
+            os.environ['IQ_VOICE_AGENT_URL'] = url
+            self.assertEqual(settings.voice_agent_url_state(), (url, ''), url)
+
+    # ---- an agent that does not answer ----
+
+    def test_an_agent_that_is_down(self):
+        self.agent.stop()
+        self.assertEqual(self.send(), voice.spoken('failed', 'pt-BR'))
+        self.assertEqual(self.send(language='en-US'), 'I could not reach the assistant right now. Please try again in a moment.')
+        stats = self.router.stats()
+        self.assertEqual((stats['failed'], stats['agent'], stats['problem']), (2, 0, 'agent:offline'))
+        self.assertEqual(self.ha.conversations, [])
+
+    def test_an_agent_that_takes_too_long(self):
+        self.agent.delay = 1.5
+        with mock.patch.object(voice, 'AGENT_URL_TIMEOUT', (1, 0.3)):
+            started = time.monotonic()
+            self.assertEqual(self.send(), voice.spoken('failed', 'pt-BR'))
+        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertEqual((self.router.stats()['failed'], self.router.stats()['problem']), (1, 'agent:timeout'))
+        self.assertEqual(voice.AGENT_URL_TIMEOUT, (10, 90))  # the real limits: 10 s to connect, 90 s for the answer
+
+    def test_a_5xx_gives_the_spoken_sentence_not_the_agents_answer(self):
+        for status in (500, 502, 503, 504):
+            self.agent.answer = (status, 'application/json', b'{"output": "ISTO NAO DEVE SAIR"}')
+            self.assertEqual(self.send(), voice.spoken('failed', 'pt-BR'), status)
+            self.assertEqual(self.router.stats()['problem'], f'agent:http_{status}')
+        self.assertEqual(self.send(language='en'), voice.spoken('failed', 'en'))
+        stats = self.router.stats()
+        self.assertEqual((stats['failed'], stats['agent'], stats['fallback']), (5, 0, 0))
+
+    def test_an_answer_that_is_too_big(self):
+        self.agent.answer = (200, 'application/json', b'x' * 500)
+        with mock.patch.object(voice, 'MAX_AGENT_ANSWER', 100):
+            self.assertEqual(self.send(), voice.spoken('failed', 'pt-BR'))
+        self.assertEqual(self.router.stats()['problem'], 'agent:too_big')
+
+    def test_a_login_that_basic_authentication_cannot_carry(self):
+        os.environ['IQ_VOICE_AGENT_USER'] = '日本'
+        self.assertEqual(self.send(), voice.spoken('failed', 'pt-BR'))
+        self.assertEqual((self.agent.requests, self.router.stats()['problem']), ([], 'agent:bad_login'))
+
+    def test_nothing_sensitive_is_kept_or_logged(self):
+        """The address, the user, the password and the words of the request are in no log line, counter, problem note or sentence (the
+        add-on's own level is INFO: at DEBUG the HTTP library itself names the host and the path of every call)."""
+        logging.getLogger().setLevel(logging.INFO)
+        secrets = ['segredo-no-caminho', 'chave=valor-secreto', 'usuario-secreto', 'senha-secreta-xyz', 'palavra-secreta-qwerty',
+                   self.agent.url[len('http://'):]]
+        os.environ['IQ_VOICE_AGENT_URL'] = self.agent.url + '/segredo-no-caminho?chave=valor-secreto'
+        os.environ['IQ_VOICE_AGENT_USER'] = 'usuario-secreto'
+        os.environ['IQ_VOICE_AGENT_PASSWORD'] = 'senha-secreta-xyz'
+        raw = json.dumps({'query': 'palavra-secreta-qwerty ' + TEXT, 'user_id': 'u-7'}).encode('utf-8')
+        said = []
+        for status in (200, 401, 503):
+            self.agent.answer = (status, 'application/json', b'{}')
+            said.append(self.send('palavra-secreta-qwerty ' + TEXT, raw=raw))
+        self.agent.delay = 1.0
+        with mock.patch.object(voice, 'AGENT_URL_TIMEOUT', (1, 0.2)):
+            said.append(self.send('palavra-secreta-qwerty ' + TEXT, raw=raw))
+        self.agent.delay = 0
+        with mock.patch.object(voice, 'MAX_AGENT_ANSWER', 1):
+            said.append(self.send('palavra-secreta-qwerty ' + TEXT, raw=raw))
+        os.environ['IQ_VOICE_AGENT_USER'] = '日本'
+        said.append(self.send('palavra-secreta-qwerty ' + TEXT, raw=raw))
+        os.environ['IQ_VOICE_AGENT_USER'] = 'usuario-secreto'
+        self.agent.stop()
+        said.append(self.send('palavra-secreta-qwerty ' + TEXT, raw=raw))
+        for url in ('ftp://usuario-secreto:senha-secreta-xyz@host/segredo-no-caminho', 'http://usuario-secreto@host/segredo-no-caminho',
+                    'http://abc123-iq-edge:8098/segredo-no-caminho'):
+            os.environ['IQ_VOICE_AGENT_URL'] = url
+            said.append(self.send('palavra-secreta-qwerty ' + TEXT, raw=raw))
+        kept = repr(self.router.stats()) + repr(self.router.memory.items) + '\n'.join(self.records.lines) + repr(said[1:])
+        for secret in secrets:
+            self.assertNotIn(secret, kept)
+        self.assertRegex(self.router.stats()['problem'], r'^agent:[a-z_0-9]+$')  # only a short code
+
+
 class VoiceOptionTests(VoiceCase):
     def test_empty_options_set_nothing(self):
         os.environ.pop('IQ_VOICE_AGENT', None)
         os.environ.pop('IQ_VOICE_ROUTE', None)
         settings.write_json(settings.data_dir() / 'options.json', {'center_url': 'https://business.iqautom8.com', 'pairing_code': '',
-                                                                 'voice_agent': '', 'voice_route': ''}, private=False)
+                                                                 'voice_agent': '', 'voice_route': '', 'voice_agent_url': '',
+                                                                 'voice_agent_user': '', 'voice_agent_password': ''}, private=False)
         self.assertEqual(settings.apply_voice_options(), [])
         self.assertEqual((settings.voice_agent(), settings.voice_route_mode()), ('', 'on'))
-        self.assertNotIn('IQ_VOICE_AGENT', os.environ)
-        self.assertNotIn('IQ_VOICE_ROUTE', os.environ)
+        self.assertEqual((settings.voice_agent_url_state(), settings.voice_agent_user(), settings.voice_agent_password()), (('', ''), '', ''))
+        self.assertEqual((settings.voice_agent_kind(), settings.voice_enabled()), ('', False))
+        for variable in settings.VOICE_OPTIONS.values():
+            self.assertNotIn(variable, os.environ)
         (settings.data_dir() / 'options.json').unlink()  # no file at all
         self.assertEqual(settings.apply_voice_options(), [])
 
@@ -438,6 +720,35 @@ class VoiceOptionTests(VoiceCase):
             settings.write_json(path, {'voice_agent': value, 'voice_route': 'sometimes'}, private=False)
             self.assertEqual(settings.apply_voice_options(), [], value)
             self.assertEqual((settings.voice_agent(), settings.voice_route_mode()), ('', 'on'))
+
+    def test_the_agent_address_user_and_password(self):
+        for variable in settings.VOICE_OPTIONS.values():
+            os.environ.pop(variable, None)
+        path = settings.data_dir() / 'options.json'
+        settings.write_json(path, {'voice_agent_url': '  http://agent.local:5000/hook  ', 'voice_agent_user': ' franco ',
+                                   'voice_agent_password': ' pass word '}, private=False)
+        self.assertEqual(settings.apply_voice_options(), ['voice_agent_url', 'voice_agent_user', 'voice_agent_password'])
+        self.assertEqual(settings.voice_agent_url_state(), ('http://agent.local:5000/hook', ''))
+        self.assertEqual((settings.voice_agent_user(), settings.voice_agent_password()), ('franco', ' pass word '))  # the password untouched
+        self.assertEqual((settings.voice_agent_kind(), settings.voice_enabled()), ('url', True))
+        settings.write_json(path, {'voice_agent_url': 'http://agent.local:5000/hook', 'voice_agent': 'conversation.iq_assistant'}, private=False)
+        settings.apply_voice_options()
+        self.assertEqual(settings.voice_agent_kind(), 'url')  # the address wins over the entity
+        for variable in settings.VOICE_OPTIONS.values():
+            os.environ.pop(variable, None)
+        for value in ('', '   ', None, 5, True, ['http://x']):  # an option that is empty or not text sets nothing
+            settings.write_json(path, {'voice_agent_url': value, 'voice_agent_user': value, 'voice_agent_password': value}, private=False)
+            self.assertEqual(settings.apply_voice_options(), [], value)
+            self.assertEqual((settings.voice_agent_kind(), settings.voice_enabled()), ('', False))
+        settings.write_json(path, {'voice_route': 'observe', 'voice_agent_user': 'franco'}, private=False)
+        settings.apply_voice_options()
+        self.assertFalse(settings.voice_enabled())  # a mode, or a user, alone does not turn the router on
+        settings.write_json(path, {'voice_agent': 'conversation.iq_assistant'}, private=False)
+        settings.apply_voice_options()
+        self.assertEqual((settings.voice_agent_kind(), settings.voice_enabled()), ('entity', True))
+        settings.write_json(path, {'voice_agent_url': 'ftp://agent.local/hook'}, private=False)
+        settings.apply_voice_options()  # a refused address is kept: the router runs and says so
+        self.assertEqual((settings.voice_agent_kind(), settings.voice_enabled()), ('refused', True))
 
     def test_the_port_and_the_host_name(self):
         self.assertEqual(settings.voice_port(), 8098)

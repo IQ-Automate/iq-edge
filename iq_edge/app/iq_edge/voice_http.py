@@ -8,6 +8,8 @@ The integration's request (POST, JSON, one per spoken sentence; every field but 
   language         "pt-BR", "en", ...                             -- used
   agent_id         the integration's own entity (conversation.x)  -- used only to catch a router pointed at itself
   user_id, user_name, device_id, device_info, messages, system_prompt, exposed_entities (a JSON text or a list), stream -- ignored
+With an agent by address (option voice_agent_url) the request is not rebuilt: its bytes go to the agent as they came (user_id, device_id,
+device_info and the rest included) and the agent's answer goes back as it is: status, content type and body (voice.Forwarded).
 The answer: `{"output": "<speech>"}` (the integration's default output field) or, when the request says `"stream": true`
 (the integration's "response streaming"), its line format: {"type":"begin"}, {"type":"item","content":"<speech>"}, {"type":"end"},
 one JSON per line. Anything else it may add (tool_calls...) is not used.
@@ -25,6 +27,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import settings
+from .voice import Forwarded
 
 logger = logging.getLogger('iq_edge.voice')
 USER = 'iq'
@@ -102,6 +105,17 @@ def make_handler(router, secret):
             if self.command != 'HEAD':
                 self.wfile.write(payload)
 
+        def send_forwarded(self, answer):
+            """An agent's own answer, as it is: its status, its content type (when it sent one) and its body."""
+            self.close_connection = True
+            self.send_response(answer.status)
+            for key, value in (('Content-Type', answer.content_type), ('Content-Length', str(len(answer.body))),
+                               ('Cache-Control', 'no-store'), ('X-Content-Type-Options', 'nosniff')):
+                if value:
+                    self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(answer.body)
+
         def authorized(self):
             if check_basic(self.headers.get('Authorization'), secret):
                 return True
@@ -136,10 +150,12 @@ def make_handler(router, secret):
             if not text:
                 return self.send_json(400, {'error': 'query'})
             try:
-                speech = router.handle(text, language, conversation_id, agent_id)
+                speech = router.handle(text, language, conversation_id, agent_id, raw)
             except Exception:  # the house keeps an answer: never the text, never a trace with it
                 logger.warning('O roteador de voz falhou numa conversa.')
                 speech = ''
+            if isinstance(speech, Forwarded):
+                return self.send_forwarded(speech)
             if not speech:
                 speech = 'Desculpe, não consegui responder agora.' if not language.lower().startswith('en') else \
                     'Sorry, I could not answer right now.'

@@ -1,7 +1,8 @@
 """The voice router's door (voice_http.py, port 8098): the password (first start, mode 600, never logged), Basic authentication on every
 request (constant-time compare), only POST /v1/conversation, JSON only, the body limit, and the request/response contract of the
 community integration "webhook-conversation" (non-streaming `{"output": ...}` and its streaming lines), end to end with the router,
-the FAKE center and the FAKE Home Assistant."""
+the FAKE center and the FAKE Home Assistant. With an agent by address the door hands the router the request's own bytes and gives Home
+Assistant the agent's answer unchanged (status, content type, body), or the router's spoken sentence in the integration's shape."""
 import base64
 import hmac
 import json
@@ -14,7 +15,7 @@ from unittest import mock
 
 from iq_edge import settings, voice, voice_http
 from iq_edge.center import Center
-from tests.fakes import EdgeCase, conversation_response
+from tests.fakes import EdgeCase, FakeAgent, conversation_response
 
 AGENT = 'conversation.iq_assistant'
 TEXT = 'liga o ar condicionado do quarto'
@@ -28,10 +29,11 @@ class StubRouter:
     """Records what the door hands to the router and answers a fixed sentence (or raises)."""
 
     def __init__(self, speech='Tudo certo, é pra já.', error=None):
-        self.speech, self.error, self.calls = speech, error, []
+        self.speech, self.error, self.calls, self.raws = speech, error, [], []
 
-    def handle(self, text, language='', conversation_id='', caller=''):
+    def handle(self, text, language='', conversation_id='', caller='', raw=None):
         self.calls.append((text, language, conversation_id, caller))
+        self.raws.append(raw)
         if self.error:
             raise self.error
         return self.speech
@@ -303,6 +305,27 @@ class ContractTests(DoorCase):
         self.assertEqual(json.loads(self.ask()[2]), {'output': 'Desculpe, não consegui responder agora.'})
         self.assertNotIn(TEXT, '\n'.join(self.records.lines))  # not even the error that carried the words
 
+    def test_the_router_gets_the_bytes_of_the_request_exactly_as_they_came(self):
+        raw = ('{ "query" : "' + TEXT + '",\n  "user_id":"u-7", "device_id": "dev-1",  "x": [1,  2] , "y":"Você" }').encode('utf-8')
+        self.assertEqual(self.call(raw=raw)[0], 200)
+        self.assertEqual(self.router.raws, [raw])  # not parsed and written again: the same bytes
+
+    def test_the_answer_of_an_agent_by_address_goes_back_as_it_is(self):
+        for answer, content_type in ((voice.Forwarded(200, 'application/json; charset=utf-8', b'{"output": "do agente antigo"}'),
+                                      'application/json; charset=utf-8'),
+                                     (voice.Forwarded(422, 'text/plain', b'recusado \xc3\xa9 isso'), 'text/plain'),
+                                     (voice.Forwarded(200, None, b'sem tipo'), None),
+                                     (voice.Forwarded(204, None, b''), None)):
+            self.router.speech = answer
+            for stream in (False, True):  # the agent already answers in the shape of the request: nothing is wrapped
+                status, reply, content = self.ask(stream=stream)
+                self.assertEqual((status, content), (answer.status, answer.body))
+                self.assertEqual(reply.getheader('Content-Type'), content_type)
+                self.assertEqual(reply.getheader('Content-Length'), str(len(answer.body)))
+                self.assertEqual(reply.getheader('Cache-Control'), 'no-store')
+                self.assertEqual(reply.getheader('X-Content-Type-Options'), 'nosniff')
+        self.assertNotIn('Python', reply.getheader('Server'))
+
     def test_unicode_both_ways(self):
         self.router.speech = 'Açaí, “pão” e café ☕'
         status, _, content = self.ask(query='Está calor, não é? ação')
@@ -310,13 +333,16 @@ class ContractTests(DoorCase):
         self.assertEqual(self.router.calls[-1][0], 'Está calor, não é? ação')
 
 
-class EndToEndTests(DoorCase):
+class RealRouterCase(DoorCase):
     """The door with the real router, the fake center and the fake Home Assistant."""
 
     def make_router(self):
         self.edge = Center()
         self.assertEqual(self.edge.pair('123456'), (True, ''))
         return voice.Router(self.edge)
+
+
+class EndToEndTests(RealRouterCase):
 
     def test_a_simple_request_is_answered_by_the_local_assistant(self):
         os.environ['IQ_VOICE_AGENT'] = AGENT
@@ -351,6 +377,91 @@ class EndToEndTests(DoorCase):
         self.call(body={'query': word}, auth='Basic ' + base64.b64encode(f'iq:{self.password}x'.encode()).decode())
         logged = '\n'.join(self.records.lines)
         for secret in (word, TEXT, self.password):
+            self.assertNotIn(secret, logged)
+
+
+class AddressEndToEndTests(RealRouterCase):
+    """An agent by ADDRESS, from Home Assistant's request to Home Assistant's answer: the old assistant's webhook is a FakeAgent."""
+
+    def setUp(self):
+        super().setUp()
+        self.agent = FakeAgent()
+        self.addCleanup(self.agent.stop)
+        os.environ['IQ_VOICE_AGENT_URL'] = self.agent.address
+        os.environ['IQ_VOICE_HOSTNAME'] = 'abc123-iq-edge'
+        self.center.route_answer = (200, {'route': 'agent', 'category': 'compound', 'sensitive': False, 'engine': 'none'}, {})
+
+    def test_the_agent_gets_the_very_bytes_and_its_answer_comes_back_unchanged(self):
+        sent = ('{"conversation_id":"01K8Z","user_id":"u-7","user_name":"Franco","language":"pt-BR",'
+                '"agent_id":"conversation.iq_router","device_id":"dev-tablet","device_info":{"name":"Tablet"},'
+                '"query":"' + TEXT + '","exposed_entities":"[{\\"entity_id\\":\\"light.sala\\"}]","stream":false,"novo":{"a":[1, 2]}}').encode('utf-8')
+        os.environ['IQ_VOICE_AGENT_USER'] = 'franco'
+        os.environ['IQ_VOICE_AGENT_PASSWORD'] = 'senha-do-agente'
+        self.agent.answer = (200, 'application/json', 'resposta própria do agente'.encode('utf-8'))
+        status, reply, content = self.call(raw=sent)
+        self.assertEqual((status, content), (200, 'resposta própria do agente'.encode('utf-8')))
+        self.assertEqual(reply.getheader('Content-Type'), 'application/json')
+        got = self.agent.requests[0]
+        self.assertEqual(got['body'], sent)  # the very bytes, user_id and device_id included
+        self.assertEqual(got['headers']['Content-Type'], 'application/json')
+        self.assertEqual(got['headers']['Authorization'], 'Basic ' + base64.b64encode(b'franco:senha-do-agente').decode())
+        self.assertEqual(self.ha.conversations, [])  # nothing through Home Assistant's conversation API
+        for key in ('IQ_VOICE_AGENT_USER', 'IQ_VOICE_AGENT_PASSWORD'):
+            del os.environ[key]
+        self.agent.answer = (418, 'text/plain', b'sou um bule')  # a status of the agent's own goes back too
+        status, reply, content = self.call(raw=sent)
+        self.assertEqual((status, content, reply.getheader('Content-Type')), (418, b'sou um bule', 'text/plain'))
+        self.assertNotIn('Authorization', self.agent.requests[1]['headers'])  # no user, no login
+
+    def test_every_way_into_the_agent_goes_by_the_address_and_a_streaming_answer_is_kept(self):
+        lines = b'{"type":"begin"}\n{"type":"item","content":"do agente"}\n{"type":"end"}\n'
+        self.agent.answer = (200, 'application/x-ndjson; charset=utf-8', lines)
+        cases = (('mode off', lambda: os.environ.__setitem__('IQ_VOICE_ROUTE', 'off'), TEXT),
+                 ('center failing', lambda: (os.environ.pop('IQ_VOICE_ROUTE', None),
+                                             setattr(self.center, 'route_answer', (500, {'error': 'x'}, {}))), TEXT),
+                 ('long text', lambda: setattr(self.center, 'route_answer', (200, {'route': 'local', 'sensitive': False}, {})), 'b' * 501))
+        for name, arrange, text in cases:
+            arrange()
+            body = json.dumps({'query': text, 'user_id': 'u-7', 'stream': True}).encode('utf-8')
+            status, reply, content = self.call(raw=body)
+            self.assertEqual((status, content, reply.getheader('Content-Type')), (200, lines, 'application/x-ndjson; charset=utf-8'), name)
+            self.assertEqual(self.agent.requests[-1]['body'], body, name)
+        self.assertEqual((len(self.agent.requests), self.ha.conversations), (3, []))
+
+    def test_an_agent_that_is_down_or_fails_gets_a_spoken_sentence_in_the_shape_of_the_request(self):
+        self.agent.answer = (503, 'application/json', b'{"output": "ISTO NAO DEVE SAIR"}')
+        status, _, content = self.ask(language='pt-BR')
+        self.assertEqual((status, json.loads(content)), (200, {'output': voice.spoken('failed', 'pt-BR')}))
+        status, reply, content = self.ask(language='en-US', stream=True)  # the stream flag is respected, the language too
+        self.assertEqual(status, 200)
+        self.assertTrue(reply.getheader('Content-Type').startswith('application/x-ndjson'))
+        self.assertEqual([json.loads(line) for line in content.decode('utf-8').splitlines()],
+                         [{'type': 'begin'}, {'type': 'item', 'content': voice.spoken('failed', 'en-US')}, {'type': 'end'}])
+        self.agent.stop()  # and an agent that is not there at all
+        self.assertEqual(json.loads(self.ask(language='en')[2]), {'output': voice.spoken('failed', 'en')})
+        self.assertEqual(self.router.stats()['failed'], 3)
+
+    def test_an_address_that_is_refused_or_loops_is_a_spoken_sentence_not_an_error(self):
+        for url, code in (('ftp://agent.local/hook', 'no_agent'), ('http://usuario:senha@agent.local/hook', 'no_agent'),
+                          ('http://abc123-iq-edge:8098/v1/conversation', 'loop'), (f'http://127.0.0.1:{settings.voice_port()}/hook', 'loop')):
+            os.environ['IQ_VOICE_AGENT_URL'] = url
+            status, _, content = self.ask(language='en')
+            self.assertEqual((status, json.loads(content)), (200, {'output': voice.spoken(code, 'en')}), url)
+        self.assertEqual(self.agent.requests, [])
+
+    def test_the_address_the_user_and_the_password_are_never_logged(self):
+        logging.getLogger().setLevel(logging.INFO)  # the add-on's own level (at DEBUG the HTTP library names the host and path)
+        os.environ['IQ_VOICE_AGENT_URL'] = self.agent.url + '/segredo-no-caminho?chave=valor-secreto'
+        os.environ['IQ_VOICE_AGENT_USER'] = 'usuario-secreto'
+        os.environ['IQ_VOICE_AGENT_PASSWORD'] = 'senha-secreta-xyz'
+        for status in (200, 500):
+            self.agent.answer = (status, 'application/json', b'{}')
+            self.ask(query='palavra-secreta-qwerty ' + TEXT)
+        self.agent.stop()
+        self.ask(query='palavra-secreta-qwerty ' + TEXT)
+        logged = '\n'.join(self.records.lines)
+        for secret in ('segredo-no-caminho', 'chave=valor-secreto', 'usuario-secreto', 'senha-secreta-xyz', 'palavra-secreta-qwerty',
+                       self.agent.url[len('http://'):], base64.b64encode(b'usuario-secreto:senha-secreta-xyz').decode(), self.password):
             self.assertNotIn(secret, logged)
 
 
