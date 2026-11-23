@@ -15,6 +15,8 @@ você edita.
   (nomes de quem está em casa, clima, o que está aberto, alarme e as manchetes candidatas). Sem plataforma ou sem resposta, o
   texto é montado por regra, como antes.
 - Prepara o Bom dia antes do horário, para a fala sair na hora.
+- Roteia a voz do assistente da casa (0.2.5): recebe os pedidos do assistente de voz, pergunta à plataforma para onde cada
+  um vai e manda ao assistente local do Home Assistant ou ao assistente que a casa já usava. Veja **Roteador de voz**.
 
 ## Instalar
 
@@ -158,6 +160,62 @@ comportamento.
 Coloque o lixo orgânico para fora." O dia vale no fuso da casa (o do Home Assistant). A IA não escreve a frase e a plataforma não
 a recebe. O botão **Testar** também mostra o lembrete.
 
+## Roteador de voz (aba Assistente, 0.2.5)
+
+O roteador recebe cada frase do assistente de voz da casa e pergunta à plataforma para onde ela vai:
+
+- **Pedido simples** (por exemplo, acender uma luz): vai ao assistente local do Home Assistant. Se ele não entender, o pedido vai
+  ao assistente.
+- **Qualquer outro pedido**: vai ao **assistente** que você escolheu na opção `voice_agent` (o que a casa já usava).
+- **Pedido sensível** (tranca, alarme, garagem, apagar tudo): vai sempre ao assistente. O add-on nunca troca isso.
+
+A casa nunca fica sem assistente. Sem pareamento, sem internet, com a plataforma lenta (mais de 2 segundos), com erro ou com
+resposta estranha, o pedido vai ao assistente. Sem assistente escolhido, o roteador responde em voz que não há assistente
+configurado.
+
+O roteador não guarda o texto dos pedidos: nem no registro, nem na aba, nem na memória depois da resposta. Ele guarda só os números
+de conversa, por 30 minutos, para a frase seguinte continuar a mesma conversa.
+
+### Opções do roteador
+
+Todas são opcionais. Depois de mudar, reinicie o add-on. A coluna da direita diz o que vale quando a opção fica vazia.
+
+| Opção | O que faz | Vazio |
+| --- | --- | --- |
+| `voice_agent` | A entidade `conversation.*` que recebe os pedidos que não são simples (o assistente que a casa já usava). Nunca escolha o agente do próprio roteador. | nenhum: o roteador avisa que não há assistente |
+| `voice_route` | `on`: a plataforma decide para onde vai cada pedido. `observe`: tudo vai ao assistente, mas a plataforma ainda é consultada e a decisão é contada na aba. `off`: tudo vai ao assistente e a plataforma nunca é consultada. | `on` |
+
+Para começar com segurança, use `observe`: a casa fala como antes e a aba **Assistente** mostra quantos pedidos a plataforma teria
+mandado ao assistente local. Quando os números parecerem bons, deixe o modo vazio (ou `on`).
+
+### Criar a entrada na integração (uma vez)
+
+Antes, a casa precisa da integração **Webhook Conversation** (no Marketplace do Home Assistant). A casa que já a usa tem tudo pronto.
+
+1. Abra a aba **IQ** → **Assistente**. Anote o **Endereço** e o **Usuário**. Toque em **Mostrar a senha** e depois em **Copiar**.
+2. No Home Assistant, abra **Configurações → Dispositivos e serviços → Webhook Conversation**.
+3. Adicione um agente de conversa novo (o nome do botão muda com a versão da integração). Preencha:
+   - **Nome**: `IQ Roteador`.
+   - **URL do webhook**: o **Endereço** da aba, no formato `http://<nome do add-on>:8098/v1/conversation`.
+   - **Tempo limite**: 90 segundos (o padrão, 30, é curto para o assistente de IA).
+   - **Tipo de autenticação**: `basic_auth`. Usuário `iq` e a senha que você copiou.
+   - **Campo de saída**: `output` (o padrão). O roteador responde bem com a resposta em fluxo ligada ou desligada.
+4. Salve. O agente novo aparece como uma entidade `conversation.*` (por exemplo, `conversation.iq_roteador`).
+5. Abra **Configurações → Assistentes de voz**, escolha o assistente que vai usar o roteador e, em **Agente de conversa**, escolha
+   o agente novo. Fale uma frase para testar.
+6. Nas opções do add-on, escreva em `voice_agent` o agente que a casa usava antes (a entrada antiga do Webhook Conversation, por
+   exemplo `conversation.webhook_conversation`). **Não** escreva o agente novo: o roteador chamaria a si mesmo. Se isso
+   acontecer, ele avisa em voz e não chama ninguém.
+7. Reinicie o add-on e abra a aba **Assistente** para ver o modo, o assistente escolhido e os números.
+
+A porta 8098 fica só na rede interna do Home Assistant: o Supervisor não a publica no aparelho (em **Configuração → Rede** ela
+aparece desligada; deixe assim). O Home Assistant chega nela pelo nome do add-on. Toda chamada pede usuário e senha. A senha nasce
+na primeira partida e fica em `/data` (só o add-on lê).
+
+A aba **Assistente** mostra os números desde que o add-on iniciou: quantos pedidos foram ao assistente local, quantos ao assistente,
+quantos foram pelo plano B (a plataforma ou o assistente local não responderam), quantos ninguém respondeu e o tempo médio da
+consulta à plataforma. Nunca mostra o texto de um pedido.
+
 ## Problemas comuns
 
 - **"A plataforma recusou o código"**: o código está errado, venceu ou já foi usado. Peça outro.
@@ -167,6 +225,12 @@ a recebe. O botão **Testar** também mostra o lembrete.
 - **"IA pelo centro: sem resposta"** na aba **Estado**: o Bom dia saiu com o texto por regra. Confira a internet da casa e o
   pareamento. A plataforma aceita 6 pedidos por hora e 30 por dia de cada casa.
 - **"Evento iq_bom_dia: sem conexão com o Home Assistant"**: o add-on tenta de novo sozinho. Se continuar, reinicie o add-on.
+- **Voz: "Error contacting webhook: HTTP 401"**: o usuário ou a senha da entrada estão errados. Copie de novo na aba **Assistente**.
+- **Voz: "Cannot connect to host"**: o endereço está errado ou o add-on está parado. O nome do add-on também aparece na página
+  **Informações** dele.
+- **Voz: tempo esgotado**: aumente o **Tempo limite** da entrada (90 segundos ou mais).
+- **O roteador fala que não há assistente configurado**: preencha `voice_agent` e reinicie o add-on.
+- **"Plano B" alto na aba Assistente**: a plataforma está lenta ou fora, ou o assistente local não entendeu os pedidos simples.
 
 ## Contrato v2 (para a equipe técnica)
 
@@ -183,6 +247,7 @@ pareamento: `Authorization: Bearer <credencial>` e `X-IQ-Edge-Home: <id da casa>
 | `POST rotate` | `{}` | 200 `{credential, previous_valid_until}` (a anterior vale mais 5 min) |
 | `POST unpair` | `{user: {name}}` | 200 `{ok}` |
 | `POST briefing-compose` | `{language, max_words, rules, house_state, facts: {names, weather, open, alarm}, candidates: [{source, limit, titles}], total_min?, total_max?}` (≤ 64 KiB) | 200 `{text, picks: [{source, indices}], model, words}` · 401/410 · 422 `invalid` · 429 `rate` · 502 `ai_failed` · 503 `no_key` |
+| `POST voice-route` | `{text (1 a 500 caracteres), language}` | 200 `{route: local\|agent, category: simple\|compound\|config\|chat\|unknown, sensitive, confidence, engine: jev\|simulated\|none, reason, ms}` · 401/410/413/422/429/5xx |
 
 Tipos de tarefa: `ha` (`{method, path, body?}`, só a lista abaixo), `prefs` (`{version, prefs}`), `preview` (`{prefs, language}`) e
 `ping`. Lista permitida para `ha`, conferida de novo no add-on: `GET /api/config`, `GET /api/states`, `GET /api/states/<entidade>`,
@@ -198,6 +263,11 @@ alarme de 40, unidade só `C`/`F`) e manda `total_min`/`total_max` quando o Bom 
 vão também `say_unit` (`false` no modo de unidade pelo idioma: a fala diz só "graus") e, com as duas unidades, `high2`/`low2`.
 Fontes com o mesmo nome vão juntas, como uma fonte só. O Bom dia preparado manda `names`
 vazio e `house_state: false`: o cumprimento e a casa entram na hora da fala.
+
+`voice-route` (0.2.5): uma tentativa e cerca de 2 s no total; depois disso o pedido segue para o assistente. Qualquer erro (401, 410,
+413, 422, 429, 5xx, tempo esgotado, resposta fora do formato) vira "assistente". Texto com mais de 500 caracteres nem vai à
+plataforma. `sensitive: true` nunca fica local, e o add-on nunca troca `agent` por `local`. O texto vai só no corpo da chamada:
+nunca no registro, em contador ou em erro.
 
 ## English
 
@@ -216,3 +286,13 @@ morning ends with a fixed reminder to take the trash out (in the home's time zon
 plays over the TV or music (`speaker_busy: interrupt`), says only "Good morning." with no names (in the speech, on the Home card
 or in the request to the platform), and, with ElevenLabs, uses the IQ voice. `speaker_busy: voice`, `greet_names: true` and a
 voice id in `tts_voice` bring back the old behavior.
+
+Since 0.2.5 the add-on is also a voice router. It listens on port 8098 (only on Home Assistant's internal network; the Supervisor
+does not publish it on the host) for the community integration Webhook Conversation, with Basic authentication (user `iq`, a
+password made on the first start and shown in the **Assistant** tab). For each spoken request it asks the platform (`voice-route`,
+about 2 s at most) where it goes: simple requests go to Home Assistant's local assistant, the others (and every sensitive one: lock,
+alarm, garage, turn everything off) go to the agent chosen in `voice_agent`. If the platform cannot answer, or the local assistant
+does not understand, the request goes to the agent: the home never loses its assistant. `voice_route` is `on` (default), `observe`
+(always the agent, the platform's decision is only counted) or `off` (the platform is never asked). The text of a request is never
+logged, shown or kept. Create the entry in Webhook Conversation with the address, user and password from the **Assistant** tab
+(timeout 90 s), pick it in the voice assistant's conversation agent, and set `voice_agent` to the agent the home used before.

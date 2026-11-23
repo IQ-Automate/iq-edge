@@ -47,3 +47,11 @@ configuration:
   trash_recycling_days:
     name: Dias do lixo reciclável
     description: "Os dias da semana do lixo reciclável. Os dias são escritos em inglês: monday = segunda, tuesday = terça, wednesday = quarta, thursday = quinta, friday = sexta, saturday = sábado, sunday = domingo. Nos dias marcados, todo Bom dia termina com um lembrete para colocar o lixo para fora. Vazio (padrão): sem lembrete."
+  voice_agent:
+    name: Roteador de voz — assistente
+    description: A entidade conversation.* que recebe os pedidos que não são simples (o assistente que a casa já usava). Vazio (padrão) = o roteador avisa que não há assistente configurado. Nunca escolha o agente do próprio roteador.
+  voice_route:
+    name: Roteador de voz — modo
+    description: "on: a plataforma decide para onde vai cada pedido (padrão quando vazio). observe: tudo vai ao assistente, mas a plataforma ainda é consultada e a decisão é contada. off: tudo vai ao assistente e a plataforma nunca é consultada."
+network:
+  8098/tcp: "Roteador de voz para o Home Assistant (webhook-conversation). Não precisa abrir no aparelho: o Home Assistant chega por dentro."

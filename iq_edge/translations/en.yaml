@@ -47,3 +47,11 @@ configuration:
   trash_recycling_days:
     name: Recycling days
     description: The weekdays of the recyclable trash. On a marked day, every good morning ends with a reminder to take it out. Empty (default) means no reminder.
+  voice_agent:
+    name: Voice router — assistant
+    description: The conversation.* entity that gets the requests that are not simple (the assistant the home used before). Empty (default) = the router says there is no assistant configured. Never choose the router's own agent.
+  voice_route:
+    name: Voice router — mode
+    description: "on: the platform decides where each request goes (default when empty). observe: everything goes to the assistant, but the platform is still asked and its decision is counted. off: everything goes to the assistant and the platform is never asked."
+network:
+  8098/tcp: "Voice router for Home Assistant (webhook-conversation). Not needed on the host: Home Assistant reaches it inside."

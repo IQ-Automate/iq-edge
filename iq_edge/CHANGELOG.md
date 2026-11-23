@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.5
+
+- Roteador de voz (lote J1b): o add-on recebe os pedidos do assistente de voz da casa (pela integração Webhook Conversation),
+  pergunta à plataforma para onde cada um vai e manda ao assistente local do Home Assistant (pedidos simples) ou ao assistente
+  que a casa já usava (os outros). Quem decide é a plataforma. O add-on nunca troca "assistente" por "local": pedido sensível
+  (tranca, alarme, garagem, apagar tudo) vai sempre ao assistente.
+- A casa nunca fica sem assistente: sem pareamento, sem plataforma, com a plataforma lenta (2 segundos no máximo), com erro ou
+  com resposta fora do formato, o pedido vai ao assistente. Se o assistente local não entender, o pedido também vai ao
+  assistente. Sem assistente escolhido, o roteador responde em voz que não há assistente configurado.
+- Porta nova 8098, só na rede interna do Home Assistant (o Supervisor não a publica no aparelho), com usuário `iq` e uma senha
+  que o add-on cria na primeira partida (`/data/voice.json`, só o add-on lê). Só aceita `POST /v1/conversation` com essa senha.
+- Duas opções novas, ambas opcionais: `voice_agent` (a entidade `conversation.*` que recebe os pedidos que não são simples) e
+  `voice_route` (`on`, `observe` ou `off`; vazio = `on`). Em `observe`, tudo vai ao assistente e a decisão da plataforma só é contada.
+- Aba nova **Assistente**: o endereço, o usuário e a senha (só depois do botão) para criar a entrada na integração, o modo, o
+  assistente escolhido e os números desde que o add-on iniciou (local, assistente, plano B, sem resposta e o tempo médio da
+  consulta à plataforma).
+- O texto dos pedidos nunca é guardado: nem no registro, nem na aba, nem na memória depois da resposta.
+- **O que muda ao atualizar:** nada do que a casa usa hoje. O add-on abre a porta 8098 e cria a senha, mas só recebe pedidos
+  depois que alguém cria a entrada na integração (veja o DOCS). Com as duas opções vazias, o Bom dia e tudo o que já existia ficam
+  exatamente como eram.
+
 ## 0.2.4
 
 - Duas opções novas, `trash_organic_days` e `trash_recycling_days`: os dias da semana do lixo orgânico e do lixo reciclável
