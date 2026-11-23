@@ -1,6 +1,7 @@
 """Lote A5: Home Assistant's event `iq_bom_dia` speaks the Bom dia now, over the FAKE websocket API (tests/fake_ws.py): auth with the
 add-on's token, the subscription, one speech per event (language from event_data; a repeat within a minute is ignored), fragmented
-messages and ping frames, Home Assistant's own ping after a silence, reconnection with back-off and a refused token."""
+messages and ping frames, Home Assistant's own ping after a silence, reconnection with back-off and a refused token. 0.2.6: the second
+subscription, `iq_bom_dia_repeat`, plays the saved audio of the last Bom dia again (one per minute, never while a Bom dia is spoken)."""
 import os
 import threading
 import time
@@ -20,9 +21,10 @@ class ListenerCase(EdgeCase):
         self.ws = FakeWebSocketHA()
         self.addCleanup(self.ws.stop)
         self.spoken, self.now = [], [1000.0]
+        self.repeated, self.repeat_answers = [], []
         self.said = threading.Event()
         self.listener = events.Listener(url=self.ws.url, token=self.token, speak=self.speak, spawn=lambda job: job(),
-                                        clock=lambda: self.now[0], backoff=(0.05, 0.1), silence=0.3)
+                                        clock=lambda: self.now[0], backoff=(0.05, 0.1), silence=0.3, repeat=self.repeat_last)
         self.thread = threading.Thread(target=self.listener.run, daemon=True)
         self.thread.start()
         self.addCleanup(self.thread.join, 5)
@@ -33,8 +35,17 @@ class ListenerCase(EdgeCase):
         self.said.set()
         return True, 'Um instante.'
 
-    def subscribed(self, count=1):
-        self.assertTrue(self.ws.wait(lambda ws: len(ws.subscriptions) >= count), 'no subscription')
+    def repeat_last(self):
+        self.repeated.append(True)
+        self.said.set()
+        answer = self.repeat_answers.pop(0) if self.repeat_answers else 'ok'
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def subscribed(self, count=1, event_type='iq_bom_dia'):
+        """The connection has subscribed to `event_type` (the add-on subscribes to iq_bom_dia, then to iq_bom_dia_repeat) `count` times."""
+        self.assertTrue(self.ws.wait(lambda ws: len([s for s in ws.subscriptions if s[2] == event_type]) >= count), 'no subscription')
 
     def until(self, test):
         for _ in range(100):
@@ -115,6 +126,100 @@ class EventTests(ListenerCase):
         self.ws.fire({'language': 'pt'})
         self.heard(1)
         self.assertEqual(self.spoken, ['pt'])
+
+
+class RepeatEventTests(ListenerCase):
+    """0.2.6: `iq_bom_dia_repeat` (a second subscription on the same connection) plays the last Bom dia again, once per minute."""
+
+    def fire_repeat(self, **options):
+        self.ws.fire({}, event_type='iq_bom_dia_repeat', **options)
+
+    def read_everything(self):
+        """A ping frame is answered after every message before it was read: when the pong is back the listener handled them all."""
+        self.ws.pongs.clear()
+        self.ws.ping_frame()
+        self.assertTrue(self.ws.wait(lambda ws: ws.pongs == [b'hi']))
+
+    def wait_for(self, count):
+        for _ in range(100):
+            if len(self.repeated) >= count:
+                return
+            self.said.wait(0.05)
+            self.said.clear()
+        self.fail(f'repeated {len(self.repeated)} times, expected {count}')
+
+    def ready(self):
+        self.subscribed()
+        self.subscribed(event_type='iq_bom_dia_repeat')
+        self.assertTrue(self.until(lambda: self.listener.public()['state'] == 'listening'))
+
+    def test_both_events_are_subscribed_on_one_connection(self):
+        self.ready()
+        self.assertEqual(self.ws.received[1], {'id': 1, 'type': 'subscribe_events', 'event_type': 'iq_bom_dia'})
+        self.assertEqual(self.ws.received[2], {'id': 2, 'type': 'subscribe_events', 'event_type': 'iq_bom_dia_repeat'})
+        self.assertEqual(self.ws.connections, 1)
+
+    def test_the_repeat_event_repeats_once_per_minute_and_never_speaks(self):
+        self.ready()
+        self.fire_repeat()
+        self.wait_for(1)
+        self.fire_repeat(fragments=3)  # the same minute: an automation that fired twice
+        self.read_everything()
+        self.assertEqual((len(self.repeated), self.spoken), (1, []))
+        self.now[0] += 61
+        self.fire_repeat()
+        self.wait_for(2)
+        self.assertEqual(self.spoken, [])
+
+    def test_it_is_not_a_bom_dia_event(self):
+        """It never starts the preparation (`last_event_at` is the sign that the home uses the event) nor the minute of the Bom dia."""
+        self.ready()
+        self.fire_repeat()
+        self.wait_for(1)
+        self.assertIsNone(prefs.state().get('last_event_at'))
+        self.assertIsNone(self.listener.public()['last_event'])
+        self.ws.fire({'language': 'en'})  # a Bom dia right after a repeat still speaks
+        self.heard(1)
+        self.assertEqual(self.spoken, ['en'])
+
+    def test_it_is_ignored_while_a_bom_dia_is_being_started(self):
+        self.ready()
+        with self.listener.lock:
+            self.listener.speaking = True
+        self.fire_repeat()
+        self.read_everything()
+        self.assertEqual(self.repeated, [])
+        with self.listener.lock:
+            self.listener.speaking = False
+        self.fire_repeat()
+        self.wait_for(1)
+
+    def test_a_repeat_that_played_nothing_or_failed_never_blocks_the_next_event(self):
+        self.ready()
+        self.repeat_answers[:] = ['none', RuntimeError('boom'), 'busy', 'ok']
+        with self.assertLogs('iq_edge.events', level='INFO') as logs:
+            for count in (1, 2, 3, 4):
+                self.fire_repeat()
+                self.wait_for(count)  # the same minute: the earlier ones played nothing, so this one goes
+            self.fire_repeat()  # now one played: a repeat within the minute is ignored
+            self.read_everything()
+        self.assertEqual(len(self.repeated), 4)
+        text = ' '.join(logs.output)
+        self.assertIn('nada tocou (none)', text)
+        self.assertIn('nada tocou (busy)', text)
+        self.assertIn('tocando', text)
+
+    def test_a_repeat_while_a_repeat_is_running_is_ignored(self):
+        self.ready()
+        jobs = []
+        self.listener.spawn = jobs.append  # the repeat does not finish until the test says so
+        self.fire_repeat()
+        self.assertTrue(self.until(lambda: len(jobs) == 1))
+        self.fire_repeat()
+        self.read_everything()
+        self.assertEqual((len(jobs), self.repeated), (1, []))
+        jobs.pop()()
+        self.assertEqual(len(self.repeated), 1)
 
 
 class RefusedTokenTests(ListenerCase):

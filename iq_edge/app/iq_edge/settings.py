@@ -9,6 +9,7 @@ Outside Home Assistant (tests, a developer's machine) the same code runs with en
   HA_URL, HA_TOKEN            the Home Assistant to talk to (default http://supervisor/core and $SUPERVISOR_TOKEN)
   IQ_CENTER_URL               the platform (default: the option center_url, else https://business.iqautom8.com)
   IQ_DATA_DIR                 instead of /data
+  IQ_MEDIA_DIR                instead of /media (the last Bom dia's audio, briefing.py)
   IQ_PAIRING_CODE             instead of the option pairing_code
   IQ_SUPERVISOR_URL           instead of http://supervisor (only used to clear the code from the options after pairing)
   IQ_INGRESS_PORT, IQ_INGRESS_PEERS   the tab's port (8099) and who may open it (only 172.30.32.2, the Supervisor; tests only)
@@ -58,6 +59,12 @@ def supervisor_url():
 
 def data_dir():
     return Path(os.getenv('IQ_DATA_DIR') or '/data')
+
+
+def media_dir():
+    """Home Assistant's media folder as the add-on sees it (config.yaml: map media:rw); the last Bom dia's audio is kept in its
+    iq-edge/ folder, so the repeat can play it. It is never created here: without the mapping the repeat is just off."""
+    return Path(os.getenv('IQ_MEDIA_DIR') or '/media')
 
 
 def parse_time(value):

@@ -1,5 +1,5 @@
 name: IQ Edge
-version: "0.2.5"
+version: "0.2.6"
 slug: iq_edge
 description: Conecta esta casa à plataforma IQ Autom8 (pareamento por código), traz o Bom dia editável na aba IQ e um roteador da voz do assistente.
 url: https://github.com/IQ-Automate/iq-edge
@@ -15,6 +15,10 @@ panel_icon: mdi:home-automation
 panel_title: IQ
 panel_admin: false
 homeassistant_api: true
+# 0.2.6: Home Assistant's media folder (/media), read and write: the audio of the last Bom dia is kept in iq-edge/ so "Repetir o último"
+# can play it again without asking the voice engine for it.
+map:
+  - media:rw
 # 0.2.5: the voice router listens here for Home Assistant Core, on the internal network (http://<hostname>:8098); null = not published on the host.
 # It only starts when voice_agent or voice_agent_url is set; with every voice option empty the add-on is what 0.2.4 was.
 ports:

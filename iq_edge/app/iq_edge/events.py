@@ -4,6 +4,10 @@ No new port and nothing comes in from outside: the add-on opens the connection. 
 `event: iq_bom_dia`, optional `event_data: {language: en}`) and the add-on speaks now, the same path as "Falar agora"
 (prefs.speak_now). Two events less than a minute apart speak once (an automation that fires twice, a loop).
 
+0.2.6: it also listens to `iq_bom_dia_repeat` (a second subscription on the same connection): the add-on plays again the saved
+audio of the last Bom dia (prefs.repeat_last; never the voice engine). One per minute too, and ignored while a Bom dia is being
+spoken. It never counts as `iq_bom_dia` (the "an event arrived" sign that starts the preparation).
+
 Standard library only: a small RFC 6455 client (masked frames, ping -> pong, close, fragmented messages, 1 MiB per message). After
 30 s of silence it sends Home Assistant's own `ping`; a second silence means a dead connection. It reconnects with back-off
 1 -> 60 s. The token never goes to the log.
@@ -27,6 +31,7 @@ from urllib.parse import urlsplit
 from . import prefs, settings
 
 EVENT = 'iq_bom_dia'
+REPEAT_EVENT = 'iq_bom_dia_repeat'
 BACKOFF = (1, 2, 4, 8, 15, 30, 60)
 COOLDOWN = 60
 SILENCE = 30
@@ -194,12 +199,14 @@ def _now_iso():
 
 
 class Listener:
-    """Listens to `iq_bom_dia` while the add-on runs. `speak(language)` is prefs.speak_now; `spawn` runs it off this thread (the
-    Bom dia takes seconds to compose; the connection must keep answering pings meanwhile)."""
+    """Listens to `iq_bom_dia` and `iq_bom_dia_repeat` while the add-on runs. `speak(language)` is prefs.speak_now and `repeat()` is
+    prefs.repeat_last; `spawn` runs them off this thread (the Bom dia takes seconds to compose; the connection must keep answering
+    pings meanwhile)."""
 
-    def __init__(self, url=None, token=None, speak=None, spawn=None, clock=time.monotonic, backoff=BACKOFF, silence=SILENCE):
+    def __init__(self, url=None, token=None, speak=None, spawn=None, clock=time.monotonic, backoff=BACKOFF, silence=SILENCE, repeat=None):
         self.url, self.token = url, token
         self.speak = speak or prefs.speak_now
+        self.repeat = repeat or prefs.repeat_last
         self.spawn = spawn or (lambda job: threading.Thread(target=job, name='iq-edge-bom-dia', daemon=True).start())
         self.clock, self.backoff, self.silence = clock, backoff, silence
         self.stop = threading.Event()
@@ -207,6 +214,8 @@ class Listener:
         self.failures = 0
         self.last_spoken = None
         self.speaking = False
+        self.last_repeated = None
+        self.repeating = False
         self.socket = None
         self.status = {'state': 'off', 'last_event': None}
 
@@ -256,8 +265,49 @@ class Listener:
             raise
         return True
 
+    def on_repeat_event(self, data):
+        """One `iq_bom_dia_repeat`: play the last Bom dia again (in the background), unless a Bom dia (or an earlier repeat) is being
+        started now or the last repeat that played was less than COOLDOWN seconds ago. True = playing. The answer of prefs.repeat_last
+        (`ok`, or `none`/`old`/`missing`/`speaker`/`busy`: nothing played) goes to the log; only `ok` starts the cooldown."""
+        now = self.clock()
+        with self.lock:
+            if self.speaking or self.repeating or (self.last_repeated is not None and now - self.last_repeated < COOLDOWN):
+                logger.info('Evento iq_bom_dia_repeat repetido em menos de 1 minuto, ou o Bom dia está falando: ignorado.')
+                return False
+            self.repeating = True
+
+        def job():
+            played = False
+            try:
+                answer = self.repeat()
+                played = answer == 'ok'
+                logger.info('Repetir o último Bom dia pelo evento do Home Assistant: %s.', 'tocando' if played else f'nada tocou ({answer})')
+            except Exception:
+                logger.exception('Erro ao repetir o Bom dia pelo evento do Home Assistant.')
+            finally:
+                with self.lock:
+                    self.repeating = False
+                    if played:
+                        self.last_repeated = self.clock()
+        try:
+            self.spawn(job)
+        except BaseException:
+            with self.lock:
+                self.repeating = False
+            raise
+        return True
+
+    def _route(self, message):
+        """An `event` message of one of the two subscriptions goes to its handler; anything else (a pong, a result) is ignored."""
+        event = message.get('event') if message.get('type') == 'event' and message.get('id') in (1, 2) else None
+        kind = event.get('event_type', EVENT) if isinstance(event, dict) else None
+        if kind == EVENT:
+            self.on_event(event.get('data') or {})
+        elif kind == REPEAT_EVENT:
+            self.on_repeat_event(event.get('data') or {})
+
     def listen(self):
-        """One connection: auth, subscribe, then events until it breaks (WebSocketError/OSError) or `stop` is set."""
+        """One connection: auth, subscribe (both events), then events until it breaks (WebSocketError/OSError) or `stop` is set."""
         ws = WebSocket(self.url or ws_url())
         self.socket = ws
         try:
@@ -269,18 +319,22 @@ class Listener:
             if not answer or answer.get('type') != 'auth_ok':
                 raise AuthFailed('auth')
             ws.send_json({'id': 1, 'type': 'subscribe_events', 'event_type': EVENT})
-            while True:
+            ws.send_json({'id': 2, 'type': 'subscribe_events', 'event_type': REPEAT_EVENT})
+            subscribed = set()
+            while subscribed != {1, 2}:
                 answer = ws.recv_json(10)
                 if answer is None:
                     raise WebSocketError('subscribe')
-                if answer.get('id') == 1 and answer.get('type') == 'result':
+                if answer.get('id') in (1, 2) and answer.get('type') == 'result':
                     if not answer.get('success'):
                         raise WebSocketError('subscribe')
-                    break
+                    subscribed.add(answer['id'])
+                else:
+                    self._route(answer)  # an event may come before the second answer: never lost
             self.failures = 0
             self._set(state='listening')
-            logger.info('Ouvindo o evento iq_bom_dia do Home Assistant.')
-            next_id, pinged = 2, False
+            logger.info('Ouvindo os eventos iq_bom_dia e iq_bom_dia_repeat do Home Assistant.')
+            next_id, pinged = 3, False
             while not self.stop.is_set():
                 message = ws.recv_json(self.silence)
                 if message is None:
@@ -290,9 +344,7 @@ class Listener:
                     next_id, pinged = next_id + 1, True
                     continue
                 pinged = False
-                event = message.get('event') if message.get('type') == 'event' and message.get('id') == 1 else None
-                if isinstance(event, dict) and event.get('event_type', EVENT) == EVENT:
-                    self.on_event(event.get('data') or {})
+                self._route(message)
         finally:
             self.socket = None
             ws.close()

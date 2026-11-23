@@ -3,12 +3,15 @@ needs the user's anti-CSRF token, pairing and unpairing from the tab, and the Bo
 tests, saves here and sends to the center."""
 import os
 import re
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.client import HTTPConnection
+from pathlib import Path
 from unittest import mock
 from urllib.parse import urlencode
 
-from iq_edge import prefs, ready, voice, voice_http, web
+from iq_edge import briefing, prefs, ready, settings, voice, voice_http, web
 from iq_edge.center import Center
 from tests.fakes import EdgeCase
 
@@ -172,6 +175,86 @@ class BriefingTests(WebCase):
             self.assertIn('Escolha o alto-falante e o motor de voz', self.call('POST', '/falar', {'csrf': self.token(html)})[1])
         with mock.patch.object(prefs, 'speak_now', return_value=(True, 'Um instante.')):
             self.assertIn('Falando o Bom dia', self.call('POST', '/falar', {'csrf': self.token(html)})[1])
+
+
+class RepeatTests(WebCase):
+    """0.2.6: "Repetir o último" next to "Falar agora": off, with the reason, when there is nothing to repeat; POST /repetir plays the saved
+    audio (never the voice engine) and tells the person why when nothing plays."""
+
+    def setUp(self):
+        super().setUp()
+        self.edge.pair('123456')
+        self.media = Path(self.tmp.name) / 'media'
+        self.media.mkdir()
+        env = mock.patch.dict(os.environ, {'IQ_BRIEFING_SATELLITE': ''})
+        env.start()
+        self.addCleanup(env.stop)
+        prefs.save_local(self.prefs())
+
+    def keep(self):
+        self.assertTrue(briefing.guardar_ultimo('Bom dia.', 'pt', briefing.speaker_config(), baixar_fn=lambda *a: (b'ID3' + b'\0' * 64, 'mp3')))
+
+    def test_the_button_is_off_with_the_reason_until_there_is_something_to_repeat(self):
+        html = self.call('GET', '/bom-dia')[1]
+        self.assertIn(f'action="{INGRESS}/falar"', html)
+        self.assertIn(f'action="{INGRESS}/repetir"', html)
+        self.assertRegex(html, r'<button type="submit" disabled>Repetir o último</button>')
+        self.assertIn('Ainda não há um Bom dia guardado para repetir.', html)
+        english = self.call('GET', '/bom-dia', headers={'Accept-Language': 'en'})[1]
+        self.assertRegex(english, r'<button type="submit" disabled>Repeat the last one</button>')
+        self.assertIn('There is no good morning saved to repeat yet.', english)
+        self.keep()
+        html = self.call('GET', '/bom-dia')[1]
+        self.assertRegex(html, r'<button type="submit">Repetir o último</button>')
+        self.assertRegex(html, r'Repetir toca o áudio guardado do Bom dia das \d\d:\d\d; a voz não é gerada de novo\.')
+        self.assertRegex(self.call('GET', '/bom-dia', headers={'Accept-Language': 'en'})[1], r'<button type="submit">Repeat the last one</button>')
+        (self.media / 'iq-edge' / 'bom-dia.mp3').unlink()
+        self.assertIn('O áudio guardado não está mais na pasta de mídia do Home Assistant.', self.call('GET', '/bom-dia')[1])
+
+    def test_an_old_one_says_so(self):
+        self.keep()
+        last = settings.data_dir() / 'briefing-last.json'
+        old = (datetime.now(timezone.utc) - timedelta(hours=21)).isoformat()
+        settings.write_json(last, dict(settings.read_json(last), spoken_at=old))
+        html = self.call('GET', '/bom-dia')[1]
+        self.assertIn('O último Bom dia tem mais de 20 horas e não é mais repetido.', html)
+        self.assertRegex(html, r'<button type="submit" disabled>')
+
+    def test_post_needs_the_token_and_tells_why_nothing_played(self):
+        html = self.call('GET', '/bom-dia')[1]
+        self.assertEqual(self.call('POST', '/repetir', {})[0], 403)  # no token
+        for answer, text in (('none', 'Ainda não há um Bom dia guardado para repetir.'),
+                             ('old', 'O último Bom dia tem mais de 20 horas'), ('missing', 'O áudio guardado não está mais na pasta de mídia'),
+                             ('speaker', 'Escolha o alto-falante e o motor de voz'), ('busy', 'Um Bom dia está falando agora.')):
+            with mock.patch.object(prefs, 'repeat_last', return_value=answer):
+                status, page, _ = self.call('POST', '/repetir', {'csrf': self.token(html)})
+            self.assertEqual(status, 200)
+            self.assertIn(text, page, answer)
+            self.assertIn('class="note warn"', page)
+        with mock.patch.object(prefs, 'repeat_last', return_value='ok'):
+            page = self.call('POST', '/repetir', {'csrf': self.token(html)})[1]
+            self.assertIn('Repetindo o último Bom dia no alto-falante escolhido.', page)
+            self.assertIn('class="note ok"', page)
+            self.assertIn('Repeating the last good morning', self.call('POST', '/repetir', {'csrf': self.token(html)},
+                                                                      {'Accept-Language': 'en'})[1])
+
+    def test_post_plays_the_saved_file_and_never_asks_for_a_voice(self):
+        self.keep()
+        html = self.call('GET', '/bom-dia')[1]
+        before = len(self.ha.log)
+        with mock.patch.object(briefing, '_estimar_duracao', return_value=0.0):
+            page = self.call('POST', '/repetir', {'csrf': self.token(html)})[1]
+        self.assertIn('Repetindo o último Bom dia', page)
+        for _ in range(100):  # the play runs in the background
+            if self.ha.service_calls:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.ha.service_calls, [('/api/services/media_player/play_media', {
+            'entity_id': 'media_player.sala', 'media_content_id': 'media-source://media_source/local/iq-edge/bom-dia.mp3',
+            'media_content_type': 'music', 'announce': True})])
+        paths = [path for _, path in self.ha.log[before:]]
+        self.assertFalse([path for path in paths if any(part in path for part in ('/tts/speak', '/tts_get_url', '/tts_proxy/', 'assist_satellite'))])
+        self.assertEqual((self.ha.tts_requests, self.ha.events), ([], []))
 
 
 class AssistantTests(WebCase):

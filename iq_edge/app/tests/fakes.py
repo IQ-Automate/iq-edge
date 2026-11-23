@@ -324,6 +324,8 @@ class EdgeCase(unittest.TestCase):
         env = mock.patch.dict(os.environ, {'HA_URL': self.ha.url + '/core', 'HA_TOKEN': TOKEN, 'IQ_CENTER_URL': self.center.url,
                                            'IQ_DATA_DIR': self.tmp.name, 'IQ_SUPERVISOR_URL': self.ha.url, 'IQ_PAIRING_CODE': '',
                                            'IQ_BRIEFING_PREFS_FILE': os.path.join(self.tmp.name, 'briefing-prefs.json'), 'IQ_EDGE_ARCH': 'amd64',
+                                           # 0.2.6: Home Assistant's media folder (the last Bom dia's audio): absent unless a test makes it
+                                           'IQ_MEDIA_DIR': os.path.join(self.tmp.name, 'media'),
                                            # 0.2.3: unset = no names; these tests cover the text WITH names (the written value `true`)
                                            'IQ_BRIEFING_GREET_NAMES': 'true'})
         env.start()

@@ -135,8 +135,8 @@ class FakeWebSocketHA:
             return self.changed.wait_for(lambda: test(self), timeout)
 
     def fire(self, data, event_type='iq_bom_dia', fragments=1):
-        """The event to every subscription (the last connection), optionally split in `fragments` frames."""
-        conn, sub_id, _ = self.subscriptions[-1]
+        """The event to the subscription of that event type (the last connection's), optionally split in `fragments` frames."""
+        conn, sub_id, _ = [sub for sub in self.subscriptions if sub[2] == event_type][-1]
         raw = json.dumps({'id': sub_id, 'type': 'event', 'event': {'event_type': event_type, 'data': data, 'origin': 'LOCAL',
                                                                    'time_fired': '2026-10-29T07:00:00+00:00'}}).encode()
         step = max(1, len(raw) // fragments)

@@ -107,3 +107,10 @@ def speak_now(language=None):
     if text != briefing._T[language]['falha_casa']:  # Home Assistant answered: the preparation of this morning can stop
         set_state(last_spoken_at=datetime.now(timezone.utc).isoformat(timespec='seconds'))
     return True, text
+
+
+def repeat_last():
+    """"Repetir o último" (the tab's button and Home Assistant's event iq_bom_dia_repeat): plays again, in the background, the saved
+    audio of the last Bom dia (briefing.repetir_ultimo: never the voice engine, so nothing is spent there). The answer is `ok` (playing)
+    or why nothing plays: `none`, `old`, `missing`, `speaker` or `busy`. No iq_bom_dia_done event."""
+    return briefing.repetir_ultimo()
