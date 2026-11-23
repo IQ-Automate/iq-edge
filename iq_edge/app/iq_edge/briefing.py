@@ -1842,6 +1842,7 @@ def precache_tts(fala: str, idioma: str, cfg: dict[str, Any]) -> bool:
 REPETIR_HORAS = 20  # o audio guardado so vale por isto
 _EXTENSOES_DO_AUDIO = ("mp3", "wav", "ogg", "flac")
 _LIMITE_AUDIO = 25_000_000  # bytes: um Bom dia tem menos de 2 MB; isto so protege o disco
+_DEMORA_DE_CACHE = 2.5  # segundos: acima disto o HA provavelmente gerou a voz de novo em vez de responder do cache
 _PASTA_DE_MIDIA = "iq-edge"  # dentro da pasta de midia do HA: media-source://media_source/local/iq-edge/bom-dia.<ext>
 _FALA_LOCK = threading.Lock()
 _FALANDO = [0]  # entregas no alto-falante em curso (o Bom dia e a repeticao): repetir nao toca por cima de uma fala
@@ -1870,7 +1871,14 @@ def baixar_audio_da_fala(fala: str, idioma: str, cfg: dict[str, Any]) -> tuple[b
     if not HA_URL or not HA_TOKEN or not fala:
         return None
     try:
+        inicio = time.monotonic()
         caminho = _caminho_do_audio(fala, idioma, cfg)
+        demora = time.monotonic() - inicio
+        # A prova, no registro, de que a voz nao foi gerada de novo: do cache o HA responde na hora; gerar leva segundos.
+        if demora > _DEMORA_DE_CACHE:
+            logger.warning("Bom dia: o Home Assistant levou %.1f s para devolver o audio da fala; a voz pode ter sido gerada de novo.", demora)
+        else:
+            logger.info("Bom dia: o Home Assistant devolveu o audio da fala em %.1f s (veio do que ele ja tinha guardado).", demora)
         if not caminho:
             return None
         pedacos, total = [], 0
@@ -2007,13 +2015,14 @@ def _contar_fala(tarefa: Callable[[], None]) -> Callable[[], None]:
     """A entrega no alto-falante (Bom dia ou satelite) conta como "falando" enquanto roda: repetir espera (devolve `busy`)."""
 
     def rodar() -> None:
+        contador = _FALANDO  # o contador em uso quando esta entrega comecou: quem soma e quem tira e sempre o mesmo
         with _FALA_LOCK:
-            _FALANDO[0] += 1
+            contador[0] += 1
         try:
             tarefa()
         finally:
             with _FALA_LOCK:
-                _FALANDO[0] -= 1
+                contador[0] -= 1
 
     return rodar
 
@@ -2038,10 +2047,11 @@ def repetir_ultimo(
     cfg = speaker_config()
     if cfg is None:
         return "speaker"
+    contador = _FALANDO
     with _FALA_LOCK:
-        if _FALANDO[0]:
+        if contador[0]:
             return "busy"
-        _FALANDO[0] += 1  # reservado ja: duas repeticoes ao mesmo tempo tocam uma so
+        contador[0] += 1  # reservado ja: duas repeticoes ao mesmo tempo tocam uma so
     extensao = str(ultimo["extension"])
     duracao = float(ultimo["seconds"]) if isinstance(ultimo.get("seconds"), (int, float)) else ultimo["size"] / 4000 + 4.0
     tocar = play_fn or tocar_audio_guardado
@@ -2063,13 +2073,13 @@ def repetir_ultimo(
             )
         finally:
             with _FALA_LOCK:
-                _FALANDO[0] -= 1
+                contador[0] -= 1
 
     try:
         (spawn_fn or (lambda f: threading.Thread(target=f, daemon=True).start()))(tarefa)
     except BaseException:
         with _FALA_LOCK:
-            _FALANDO[0] -= 1
+            contador[0] -= 1
         raise
     return "ok"
 

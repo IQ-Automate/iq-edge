@@ -29,6 +29,11 @@ class RepeatCase(EdgeCase):
         env = mock.patch.dict(os.environ, {'IQ_BRIEFING_TTS_VOICE': 'voz-pt', 'IQ_BRIEFING_SATELLITE': ''})
         env.start()
         self.addCleanup(env.stop)
+        # A counter of its own: a Bom dia of another test module may still be "speaking" in a background thread (the whole suite runs
+        # in one process), and it must neither make these repeats busy nor change this counter when it ends.
+        counter = mock.patch.object(briefing, '_FALANDO', [0])
+        counter.start()
+        self.addCleanup(counter.stop)
         prefs.save_local(self.prefs())  # media_player.sala, tts.google_pt, volume 40
         self.cfg = briefing.speaker_config()
         self.audio = self.media / 'iq-edge' / 'bom-dia.mp3'
