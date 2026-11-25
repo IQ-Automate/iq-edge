@@ -30,7 +30,7 @@ COMPOSE_TIMEOUT = 45
 COMPOSE_ERRORS = {401: 'revoked', 410: 'home_deleted', 413: 'too_big', 422: 'invalid', 429: 'rate', 502: 'ai_failed', 503: 'no_key'}
 ROUTE_BUDGET = 2.0  # seconds, the whole voice-route call (connect + answer): the person is waiting for the house to answer
 ROUTE_ERRORS = {401: 'revoked', 410: 'home_deleted', 413: 'too_big', 422: 'invalid', 429: 'rate'}
-ROUTE_CATEGORIES = ('simple', 'compound', 'config', 'chat', 'unknown')
+ROUTE_CATEGORIES = ('simple', 'compound', 'config', 'chat', 'house', 'unknown')  # a category not listed here is read as 'unknown'
 logger = logging.getLogger('iq_edge.center')
 
 

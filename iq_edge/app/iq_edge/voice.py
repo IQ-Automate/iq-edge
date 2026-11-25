@@ -19,9 +19,19 @@ step (_to_agent).
      does an address that is refused (not http or https, a user or password inside it, or this add-on's own listener: it would call
      itself) and an agent by address that cannot be reached or answers 5xx. A 4xx or 3xx of the agent is handed back as it is.
 
+The chat agent (option voice_chat_agent, 0.2.7, a conversation.* entity of Home Assistant that must not control the house): in mode `on`,
+when the center answers category `chat` and the request is not sensitive and the route is not `local`, the request goes to it (only the
+words, the language and the conversation id, the same way an agent by entity gets them), not to the main agent. Every other category (known
+or not: compound, config, house, unknown, one that does not exist yet), every sensitive request, mode `off`, a long text and a center that
+did not answer go to the main agent as in 0.2.6. A chat agent that does not answer, answers with an error or is the router itself (the same
+guard as for voice_agent) sends the request to the main agent at once; that is counted (`chat_fallback`). Mode `observe` diverts nothing:
+it counts what WOULD go to the chat agent (`observed_chat`, instead of `observed_agent`). Option empty = exactly 0.2.6.
+
 Every request ends in exactly one outcome, counted since the start (the tab shows them): `local` (the local assistant answered),
-`agent` (the agent, by the center's decision, the mode or the text size), `fallback` (the agent, because the center could not answer
-or the local assistant did not), `failed` (nobody answered: no agent, the agent failed or the choice is this router itself).
+`chat` (the chat agent answered), `agent` (the agent, by the center's decision, the mode or the text size, also when the chat agent did
+not answer), `fallback` (the agent, because the center could not answer or the local assistant did not), `failed` (nobody answered: no
+agent, the agent failed or the choice is this router itself). `chat_fallback` is not an outcome: it counts the requests the chat agent
+did not answer, which then ended in `agent` (or `failed`).
 
 The words of a request live only in the call: never in a log, a counter, the memory below or the tab; nor does the agent's address,
 user or password (and an exception of the HTTP library, which carries the address, is never logged: only a short code is kept). The
@@ -41,6 +51,7 @@ from .center import NoRoute
 MAX_ROUTE_TEXT = 500  # the center takes 1 to 500 characters: a longer request is not even sent
 LOCAL_AGENT = 'conversation.home_assistant'
 LOCAL_TIMEOUT = 10
+CHAT_TIMEOUT = 30  # the chat agent: when it is slower than this the main agent answers instead (the integration's own limit is 90 s)
 AGENT_TIMEOUT = 60  # the integration's own timeout (default 30 s, up to 300) should be longer; DOCS.md says 90
 AGENT_URL_TIMEOUT = (10, 90)  # an agent by address: seconds to connect, seconds to wait for its answer (the integration's own is 90)
 MAX_AGENT_ANSWER = 4 * 1024 * 1024
@@ -57,6 +68,10 @@ SPOKEN = {
 
 
 Forwarded = namedtuple('Forwarded', 'status content_type body')  # an agent's answer, to go back to Home Assistant as it is (bytes)
+# What Router.decide says: `route` 'local' or 'agent'; `how` '' (the center decided or the mode says so) or 'fallback' (mode on and the
+# center could not answer); `category` what the center said ('' when it was not asked or not heard, and always in mode observe: nothing
+# is diverted); `sensitive` (the center's flag: a sensitive request is never `chat`).
+Decision = namedtuple('Decision', 'route how category sensitive')
 
 
 def spoken(code, language):
@@ -107,7 +122,7 @@ class Router:
         self.lock = threading.Lock()
         self.since = datetime.now(timezone.utc).isoformat(timespec='seconds')
         self.counts = dict.fromkeys(('local', 'agent', 'fallback', 'failed', 'center_calls', 'center_ms', 'center_errors',
-                                     'observed_local', 'observed_agent'), 0)
+                                     'observed_local', 'observed_agent', 'chat', 'chat_fallback', 'observed_chat'), 0)
         self.problem = ''  # the last problem as a short code (never a word of a request)
 
     # ---- the tab's numbers ----
@@ -167,12 +182,20 @@ class Router:
 
     # ---- the flow ----
 
+    @staticmethod
+    def _chat_decision(route, category, sensitive):
+        """True when the center's answer sends the request to the chat agent (when there is one): category `chat`, the route is not
+        `local` and it is not sensitive. Every other category, known or not, stays with the main agent."""
+        return route == 'agent' and category == 'chat' and sensitive is not True
+
     def decide(self, text, language):
-        """(route, how): route 'local' or 'agent'; how '' (the center decided or the mode says so) or 'fallback' (mode on and the
-        center could not answer). Mode observe asks the center and counts its decision, but the route is always 'agent'."""
+        """A Decision (route, how, category, sensitive): route 'local' or 'agent'; how '' (the center decided or the mode says so) or
+        'fallback' (mode on and the center could not answer); category and sensitive are what the center said (category '' and
+        sensitive False when it was not asked or did not answer). Mode observe asks the center and counts its decision (and, with a
+        chat agent set, how many requests WOULD go to it), but nothing is diverted: the route is always 'agent' and the category ''."""
         mode = settings.voice_route_mode()
         if mode == 'off' or len(text) > MAX_ROUTE_TEXT:
-            return 'agent', ''
+            return Decision('agent', '', '', False)
         started = self.clock()
         try:
             decision = self.center.voice_route(text, (language or 'pt').split('-')[0].split('_')[0].lower() or 'pt')
@@ -184,11 +207,13 @@ class Router:
         if decision is None:
             self._count('center_errors')
             self._note('center:' + problem)
-            return 'agent', 'fallback' if mode == 'on' else ''
+            return Decision('agent', 'fallback' if mode == 'on' else '', '', False)
+        route, category, sensitive = decision['route'], decision.get('category') or '', decision.get('sensitive') is True
         if mode == 'observe':
-            self._count('observed_' + decision['route'])
-            return 'agent', ''
-        return decision['route'], ''
+            would_chat = settings.voice_chat_agent() and self._chat_decision(route, category, sensitive)
+            self._count('observed_chat' if would_chat else 'observed_' + route)
+            return Decision('agent', '', '', False)
+        return Decision(route, '', category, sensitive)
 
     def _forward(self, address, raw):
         """(Forwarded or None, problem): the request's own bytes by POST to the agent's address. problem '' = a 2xx (hand it back);
@@ -250,16 +275,40 @@ class Router:
         self._count('fallback' if how == 'fallback' else 'agent')
         return speech
 
+    def _to_chat(self, text, language, conversation_id, caller):
+        """The chat agent's sentence, or '' when it did not answer (nothing to say: the caller goes on to the main agent). It is asked
+        the way an agent by entity is: only the words, the language and the conversation id (its own, kept apart from the main agent's).
+        An error response is no answer even with a sentence: the main agent answers instead. The same guard as for voice_agent: an
+        entity that is the router itself is not called."""
+        agent = settings.voice_chat_agent()
+        if agent == str(caller or '').strip().lower():
+            self._count('chat_fallback')
+            self._note('chat:itself')
+            return ''
+        speech, problem = self._converse('chat', agent, text, language, conversation_id, CHAT_TIMEOUT)
+        if problem:
+            self._count('chat_fallback')
+            self._note('chat:' + problem)
+            return ''
+        self._count('chat')
+        return speech
+
     def handle(self, text, language='', conversation_id='', caller='', raw=None):
         """What goes back to Home Assistant for one request: the text to speak (a str) or, from an agent by address, its own answer
         (a Forwarded). `caller` is the entity that sent it (the integration's own agent id), only to catch a router pointed at itself;
         `raw` is the request exactly as it arrived (bytes), which an agent by address gets untouched."""
-        route, how = self.decide(text, language)
-        if route == 'local':
+        decision = self.decide(text, language)
+        how = decision.how
+        if decision.route == 'local':
             speech, problem = self._converse('local', LOCAL_AGENT, text, language, conversation_id, LOCAL_TIMEOUT)
             if not problem and speech:
                 self._count('local')
                 return speech
             self._note('local:' + (problem or 'empty'))
             how = 'fallback'  # Home Assistant's own assistant did not answer (no intent matched...): the agent does
+        elif settings.voice_chat_agent() and self._chat_decision(decision.route, decision.category, decision.sensitive):
+            speech = self._to_chat(text, language, conversation_id, caller)
+            if speech:
+                return speech
+            # the chat agent did not answer (counted in _to_chat): the main agent does, as for any other request
         return self._to_agent(text, language, conversation_id, caller, raw, how)

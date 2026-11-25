@@ -17,7 +17,8 @@ from iq_edge.center import Center, NoRoute
 from tests.fakes import EdgeCase, FakeAgent, conversation_response
 
 AGENT = 'conversation.iq_assistant'
-TEXT = 'acende a luz da sala de jantar'
+CHAT_AGENT = 'conversation.iq_conversa'  # 0.2.7: the agent that only chats
+TEXT ='acende a luz da sala de jantar'
 # a request as the integration "webhook-conversation" sends it, byte for byte (no spaces after the colons, an accent, an unknown key)
 BODY = ('{"conversation_id":"01K8Z","user_id":"u-7","user_name":"Franco","language":"pt-BR","agent_id":"conversation.iq_router",'
         '"device_id":"dev-tablet","device_info":{"name":"Tablet da sala","manufacturer":"X","model":"Y"},'
@@ -56,8 +57,8 @@ class VoiceCase(EdgeCase):
         self.addCleanup(root.setLevel, self.level)
         self.addCleanup(root.removeHandler, self.records)
 
-    def options(self, agent=None, mode=None):
-        for name, value in (('IQ_VOICE_AGENT', agent), ('IQ_VOICE_ROUTE', mode)):
+    def options(self, agent=None, mode=None, chat=None):
+        for name, value in (('IQ_VOICE_AGENT', agent), ('IQ_VOICE_ROUTE', mode), ('IQ_VOICE_CHAT_AGENT', chat)):
             if value is None:
                 os.environ.pop(name, None)
             else:
@@ -336,6 +337,188 @@ class FlowTests(VoiceCase):
         self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
 
 
+CHAT = decision(route='agent', category='chat')
+CHAT_SPEECH = 'Brasília é a capital do Brasil.'
+
+
+class ChatAgentTests(VoiceCase):
+    """0.2.7: the chat agent (voice_chat_agent). In mode on, a `chat` request that is not sensitive and not local goes to it; everything
+    else goes where it went in 0.2.6; when it does not answer the main agent does, and that is counted; observe diverts nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.options(agent=AGENT, chat=CHAT_AGENT)
+        self.center.route_answer = CHAT
+        self.ha.conversation_answers[CHAT_AGENT] = lambda body: (200, conversation_response(
+            CHAT_SPEECH, 'query_answer', body.get('conversation_id') or 'chat-conv-1'))
+
+    def counts(self, *names):
+        stats = self.router.stats()
+        return tuple(stats[name] for name in names)
+
+    def test_chat_goes_to_the_chat_agent_with_the_language_and_the_conversation_id(self):
+        self.assertEqual(self.router.handle(TEXT, 'pt-BR', 'in-1'), CHAT_SPEECH)
+        self.assertEqual(self.agents(), [CHAT_AGENT])  # not the main agent, not the local assistant
+        self.assertEqual(self.ha.conversations[0], {'text': TEXT, 'agent_id': CHAT_AGENT, 'language': 'pt-BR'})
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'agent', 'fallback', 'failed', 'local'), (1, 0, 0, 0, 0, 0))
+        self.assertEqual(self.router.handle('e a de Goiás?', 'pt-BR', 'in-1'), CHAT_SPEECH)  # a follow-up: the chat agent's own id
+        self.assertEqual(self.ha.conversations[1].get('conversation_id'), 'chat-conv-1')
+        self.assertNotIn('incoming', repr(self.ha.conversations))  # the incoming id never leaves the router
+        self.assertEqual(self.counts('chat'), (2,))
+        self.assertNoWords(TEXT, 'Goiás')
+
+    def test_the_chat_agent_and_the_main_agent_keep_their_own_conversation_ids(self):
+        self.ha.conversation_answers[AGENT] = lambda body: (200, conversation_response('Ok.', 'query_answer', 'main-conv-1'))
+        for category, text in (('chat', 'um'), ('compound', 'dois'), ('chat', 'tres'), ('compound', 'quatro')):
+            self.center.route_answer = decision(route='agent', category=category)
+            self.router.handle(text, 'pt', 'incoming-A')
+        by_agent = {}
+        for body in self.ha.conversations:
+            by_agent.setdefault(body['agent_id'], []).append(body.get('conversation_id'))
+        self.assertEqual(by_agent, {CHAT_AGENT: [None, 'chat-conv-1'], AGENT: [None, 'main-conv-1']})
+
+    def test_a_sensitive_chat_request_goes_to_the_main_agent(self):
+        for answer in (decision(route='agent', category='chat', sensitive=True),
+                       decision(route='local', category='chat', sensitive=True)):  # even a contradictory one
+            self.center.route_answer = answer
+            self.ha.conversations.clear()
+            self.assertEqual(self.router.handle('abre a garagem', 'pt'), 'Resposta do assistente.')
+            self.assertEqual(self.agents(), [AGENT], answer)
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'agent'), (0, 0, 2))
+
+    def test_chat_without_a_chat_agent_goes_to_the_main_agent_as_in_0_2_6(self):
+        for empty in (None, ''):
+            self.options(agent=AGENT, chat=empty)
+            self.ha.conversations.clear()
+            self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+            self.assertEqual(self.agents(), [AGENT])
+        os.environ['IQ_VOICE_CHAT_AGENT'] = 'light.sala'  # not a conversation entity: the same as none
+        self.assertEqual((settings.voice_chat_agent(), self.router.handle(TEXT, 'pt')), ('', 'Resposta do assistente.'))
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'agent'), (0, 0, 3))
+
+    def test_a_chat_request_the_center_sends_to_the_local_assistant_stays_there(self):
+        self.center.route_answer = decision(route='local', category='chat')
+        self.ha.conversation_answers['conversation.home_assistant'] = (200, conversation_response('Feito.', 'action_done'))
+        self.assertEqual(self.router.handle(TEXT, 'pt'), 'Feito.')
+        self.assertEqual(self.agents(), ['conversation.home_assistant'])
+        del self.ha.conversation_answers['conversation.home_assistant']  # it does not understand: the MAIN agent, not the chat agent
+        self.ha.conversations.clear()
+        self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+        self.assertEqual(self.agents(), ['conversation.home_assistant', AGENT])
+        self.assertEqual(self.counts('local', 'chat', 'fallback'), (1, 0, 1))
+
+    def test_every_other_category_goes_to_the_main_agent(self):
+        for category in ('simple', 'compound', 'config', 'house', 'unknown', 'weird', 'a-new-one', ''):
+            self.center.route_answer = decision(route='agent', category=category)
+            self.ha.conversations.clear()
+            self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.', category)
+            self.assertEqual(self.agents(), [AGENT], category)
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'agent'), (0, 0, 8))
+        self.center.route_answer = (200, {'route': 'agent', 'sensitive': False}, {})  # no category at all
+        self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+        self.assertEqual(self.counts('chat'), (0,))
+
+    def test_a_chat_agent_that_does_not_answer_sends_the_request_to_the_main_agent(self):
+        cases = ((500, {'message': 'boom'}, 'chat:http_500'), (404, {'message': 'Agent not found'}, 'chat:http_404'),
+                 (200, {'weird': 1}, 'chat:bad_response'), (200, conversation_response('', 'query_answer'), 'chat:bad_response'),
+                 # an error response is no answer even when it has a sentence: the main agent answers instead
+                 (200, conversation_response('Desculpe, deu erro.', 'error', code='unknown'), 'chat:error_response'))
+        for status, answer, problem in cases:
+            self.ha.conversation_answers[CHAT_AGENT] = (status, answer)
+            self.ha.conversations.clear()
+            self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.', problem)
+            self.assertEqual(self.agents(), [CHAT_AGENT, AGENT], problem)
+            self.assertEqual(self.router.stats()['problem'], problem)
+        self.ha.stop()  # Home Assistant itself is gone: the chat agent fails, and so does the main agent
+        self.assertIn('Não consegui falar', self.router.handle(TEXT, 'pt'))
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'agent', 'failed'), (0, 6, 5, 1))
+        self.assertEqual(self.router.stats()['problem'], 'agent:offline')
+        self.assertNoWords()
+
+    def test_a_chat_agent_that_is_slow_is_given_up_on(self):
+        self.ha.conversation_delay = 0.6
+        with mock.patch.object(voice, 'CHAT_TIMEOUT', 0.2):
+            started = time.monotonic()
+            self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+        self.assertLess(time.monotonic() - started, 1.6)
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'agent'), (0, 1, 1))
+        self.assertEqual(voice.CHAT_TIMEOUT, 30)
+
+    def test_a_chat_agent_that_is_the_router_itself_is_not_called(self):
+        self.options(agent=AGENT, chat='conversation.iq_router')
+        self.assertEqual(self.router.handle(TEXT, 'pt', caller='conversation.iq_router'), 'Resposta do assistente.')
+        self.assertEqual(self.agents(), [AGENT])  # the guard is the one voice_agent has
+        self.assertEqual((self.counts('chat', 'chat_fallback', 'agent'), self.router.stats()['problem']), ((0, 1, 1), 'chat:itself'))
+        self.assertEqual(self.router.handle(TEXT, 'pt', caller='conversation.other'), 'Resposta do assistente.')  # another caller: it is a chat agent
+        self.assertEqual(self.agents(), [AGENT, 'conversation.iq_router'])
+        self.assertEqual(self.counts('chat'), (1,))
+
+    def test_mode_off_never_asks_the_center_and_never_chats(self):
+        self.options(agent=AGENT, mode='off', chat=CHAT_AGENT)
+        self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+        self.assertEqual((self.center.routed, self.agents()), ([], [AGENT]))
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'observed_chat', 'agent'), (0, 0, 0, 1))
+
+    def test_mode_observe_diverts_nothing_and_counts_what_would_go_to_the_chat_agent(self):
+        self.options(agent=AGENT, mode='observe', chat=CHAT_AGENT)
+        for answer in (CHAT, decision(route='agent', category='compound'), decision(route='local', category='simple'),
+                       decision(route='agent', category='chat', sensitive=True), decision(route='local', category='chat'), CHAT):
+            self.center.route_answer = answer
+            self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+        self.assertEqual(self.agents(), [AGENT] * 6)  # always the main agent: neither the chat agent nor the local assistant
+        self.assertEqual(self.counts('observed_chat', 'observed_agent', 'observed_local'), (2, 2, 2))  # (a local `chat` is still local)
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'local', 'agent', 'fallback'), (0, 0, 0, 6, 0))
+        self.options(agent=AGENT, mode='observe')  # without a chat agent a chat decision is counted as an agent decision, as in 0.2.6
+        self.center.route_answer = CHAT
+        self.router.handle(TEXT, 'pt')
+        self.assertEqual(self.counts('observed_chat', 'observed_agent'), (2, 3))
+        self.center.stop()  # a center that does not answer: nothing observed, and still no fallback in observe
+        self.router.handle(TEXT, 'pt')
+        self.assertEqual(self.counts('observed_chat', 'observed_agent', 'center_errors', 'fallback'), (2, 3, 1, 0))
+
+    def test_a_center_that_cannot_answer_and_a_long_text_go_to_the_main_agent(self):
+        self.center.route_answer = (500, {'error': 'x'}, {})
+        self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+        self.center.route_answer = CHAT
+        self.assertEqual(self.router.handle('a' * (voice.MAX_ROUTE_TEXT + 1), 'pt'), 'Resposta do assistente.')
+        self.edge.forget()  # not paired
+        self.assertEqual(self.router.handle(TEXT, 'pt'), 'Resposta do assistente.')
+        self.assertEqual(self.agents(), [AGENT] * 3)
+        self.assertEqual(self.counts('chat', 'chat_fallback', 'fallback', 'agent'), (0, 0, 2, 1))
+
+    def test_decide_says_the_category_and_whether_it_is_sensitive(self):
+        self.assertEqual(self.router.decide(TEXT, 'pt'), voice.Decision('agent', '', 'chat', False))
+        self.center.route_answer = decision(route='local', category='simple')
+        self.assertEqual(self.router.decide(TEXT, 'pt-BR'), voice.Decision('local', '', 'simple', False))
+        self.center.route_answer = decision(route='agent', category='chat', sensitive=True)
+        self.assertEqual(self.router.decide(TEXT, 'pt'), voice.Decision('agent', '', 'chat', True))
+        self.center.route_answer = decision(route='agent', category='house')  # the center's new category: a known one, for the main agent
+        self.assertEqual(self.router.decide(TEXT, 'pt'), voice.Decision('agent', '', 'house', False))
+        self.center.route_answer = decision(route='agent', category='from-the-future')
+        self.assertEqual(self.router.decide(TEXT, 'pt'), voice.Decision('agent', '', 'unknown', False))
+        self.center.route_answer = (500, {}, {})
+        self.assertEqual(self.router.decide(TEXT, 'pt'), voice.Decision('agent', 'fallback', '', False))
+        self.assertEqual(self.router.decide('a' * (voice.MAX_ROUTE_TEXT + 1), 'pt'), voice.Decision('agent', '', '', False))
+        self.options(agent=AGENT, mode='off', chat=CHAT_AGENT)
+        self.assertEqual(self.router.decide(TEXT, 'pt'), voice.Decision('agent', '', '', False))
+        self.options(agent=AGENT, mode='observe', chat=CHAT_AGENT)
+        self.center.route_answer = CHAT
+        self.assertEqual(self.router.decide(TEXT, 'pt'), voice.Decision('agent', '', '', False))  # nothing is diverted in observe
+
+    def test_no_word_of_a_request_is_kept_or_logged_on_any_chat_path(self):
+        word = 'segredo-da-familia-xyz'
+        for answer in ((200, conversation_response(CHAT_SPEECH, 'query_answer', 'c1')), (500, {}),
+                       (200, conversation_response('Desculpe.', 'error', code='unknown'))):
+            self.ha.conversation_answers[CHAT_AGENT] = answer
+            self.router.handle(f'{word} {TEXT}', 'pt', 'incoming-A')
+        self.options(agent=AGENT, chat='conversation.iq_router')
+        self.router.handle(f'{word} {TEXT}', 'pt', caller='conversation.iq_router')
+        self.options(agent=AGENT, mode='observe', chat=CHAT_AGENT)
+        self.router.handle(f'{word} {TEXT}', 'pt')
+        self.assertNoWords(word, TEXT)
+        self.assertRegex(self.router.stats()['problem'], r'^[a-z_]+:[a-z_0-9]+$')  # only a short code
+
+
 class ConversationIdTests(VoiceCase):
     def test_a_follow_up_goes_to_the_same_conversation(self):
         self.options(agent=AGENT)
@@ -406,7 +589,15 @@ class StatsAndLogTests(VoiceCase):
             self.center.route_answer = answer
             self.router.handle(TEXT, 'pt')
         stats = self.router.stats()
-        self.assertEqual(stats['local'] + stats['agent'] + stats['fallback'] + stats['failed'], 3)
+        self.assertEqual(stats['local'] + stats['agent'] + stats['fallback'] + stats['failed'] + stats['chat'], 3)
+        self.options(agent=AGENT, chat=CHAT_AGENT)  # 0.2.7: the chat agent is one more outcome; its failure is not
+        for answer in (decision(route='agent', category='chat'), decision(route='agent', category='chat')):
+            self.center.route_answer = answer
+            self.router.handle(TEXT, 'pt')
+            self.ha.conversation_answers[CHAT_AGENT] = (500, {})  # the second one: the chat agent fails, the main agent answers
+        stats = self.router.stats()
+        self.assertEqual(stats['local'] + stats['agent'] + stats['fallback'] + stats['failed'] + stats['chat'], 5)
+        self.assertEqual((stats['chat'], stats['chat_fallback']), (1, 1))
 
     def test_no_word_of_a_request_in_the_log_on_any_path(self):
         word = 'segredo-da-familia-xyz'
@@ -691,6 +882,36 @@ class AgentByAddressTests(AgentByAddressCase):
         self.assertRegex(self.router.stats()['problem'], r'^agent:[a-z_0-9]+$')  # only a short code
 
 
+class ChatAgentWithAnAddressTests(AgentByAddressCase):
+    """0.2.7: the main agent by address and the chat agent by entity: the chat goes through Home Assistant, the rest is handed over
+    untouched as before, and a chat agent that fails sends the request's own bytes to the address."""
+
+    def setUp(self):
+        super().setUp()
+        self.options(chat=CHAT_AGENT)
+        self.center.route_answer = CHAT
+
+    def test_the_chat_agent_answers_and_the_address_is_not_called(self):
+        self.assertEqual(self.send(), 'Resposta do assistente.')  # (the fake's default sentence for a conversation agent)
+        self.assertEqual((self.agent.requests, self.agents()), ([], [CHAT_AGENT]))
+        self.assertEqual(self.router.stats()['chat'], 1)
+
+    def test_a_chat_agent_that_fails_sends_the_untouched_request_to_the_address(self):
+        self.ha.conversation_answers[CHAT_AGENT] = (500, {'message': 'boom'})
+        self.assertEqual(self.send(), voice.Forwarded(200, 'application/json', b'{"output": "Resposta do agente antigo."}'))
+        self.assertEqual([request['body'] for request in self.agent.requests], [BODY])  # exactly the bytes Home Assistant sent
+        self.assertEqual(self.agents(), [CHAT_AGENT])
+        stats = self.router.stats()
+        self.assertEqual((stats['chat'], stats['chat_fallback'], stats['agent'], stats['problem']), (0, 1, 1, 'chat:http_500'))
+
+    def test_anything_else_is_handed_over_as_before(self):
+        for answer in (decision(route='agent', category='compound'), decision(route='agent', category='chat', sensitive=True)):
+            self.center.route_answer = answer
+            self.assertIsInstance(self.send(), voice.Forwarded)
+        self.assertEqual([request['body'] for request in self.agent.requests], [BODY, BODY])
+        self.assertEqual(self.agents(), [])
+
+
 class VoiceOptionTests(VoiceCase):
     def test_empty_options_set_nothing(self):
         os.environ.pop('IQ_VOICE_AGENT', None)
@@ -720,6 +941,28 @@ class VoiceOptionTests(VoiceCase):
             settings.write_json(path, {'voice_agent': value, 'voice_route': 'sometimes'}, private=False)
             self.assertEqual(settings.apply_voice_options(), [], value)
             self.assertEqual((settings.voice_agent(), settings.voice_route_mode()), ('', 'on'))
+
+    def test_the_chat_agent_option(self):
+        """0.2.7: voice_chat_agent takes what voice_agent takes (a conversation.* entity, trimmed and lower-cased), an invalid or empty
+        value sets nothing, and it never turns the router on by itself."""
+        for variable in settings.VOICE_OPTIONS.values():
+            os.environ.pop(variable, None)
+        path = settings.data_dir() / 'options.json'
+        settings.write_json(path, {'voice_chat_agent': ' Conversation.IQ_Conversa '}, private=False)
+        self.assertEqual(settings.apply_voice_options(), ['voice_chat_agent'])
+        self.assertEqual((settings.voice_chat_agent(), settings.voice_agent()), ('conversation.iq_conversa', ''))
+        self.assertFalse(settings.voice_enabled())  # not an agent of the router: with it alone the router stays off
+        settings.write_json(path, {'voice_agent': 'conversation.iq_assistant', 'voice_chat_agent': 'conversation.iq_conversa',
+                                   'voice_route': 'observe'}, private=False)
+        self.assertEqual(settings.apply_voice_options(), ['voice_agent', 'voice_chat_agent', 'voice_route'])
+        self.assertEqual((settings.voice_agent_kind(), settings.voice_enabled()), ('entity', True))
+        for variable in settings.VOICE_OPTIONS.values():
+            os.environ.pop(variable, None)
+        for value in ('', '   ', 'light.sala', 'conversation.', 'conversation.a b', ['conversation.a'], 5, True, None):
+            settings.write_json(path, {'voice_chat_agent': value}, private=False)
+            self.assertEqual(settings.apply_voice_options(), [], value)
+            self.assertEqual(settings.voice_chat_agent(), '')
+        self.assertNotIn('IQ_VOICE_CHAT_AGENT', os.environ)
 
     def test_the_agent_address_user_and_password(self):
         for variable in settings.VOICE_OPTIONS.values():
