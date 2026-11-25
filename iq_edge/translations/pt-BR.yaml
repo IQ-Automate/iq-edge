@@ -50,6 +50,9 @@ configuration:
   voice_agent:
     name: Roteador de voz — assistente por entidade
     description: A entidade conversation.* do Home Assistant que recebe os pedidos que não são simples. Só as palavras do pedido chegam a ela. Ela não sabe quem está falando nem de qual aparelho. Para um assistente que a integração Webhook Conversation usa hoje, preencha voice_agent_url. Nunca escolha o agente do próprio roteador. Vazio (padrão) = não é usada.
+  voice_chat_agent:
+    name: Roteador de voz — assistente de conversa
+    description: A entidade conversation.* do Home Assistant que recebe só as conversas e as perguntas gerais. Só as palavras do pedido chegam a ela. Ela NÃO deve poder controlar a casa (desligue nela a opção de controlar o Home Assistant e não exponha entidades a ela). Só vale quando voice_agent ou voice_agent_url está preenchida. Se ela não responder, o pedido vai ao assistente principal. Nunca escolha o agente do próprio roteador. Vazio (padrão) = não é usada, e a conversa vai ao assistente principal.
   voice_route:
     name: Roteador de voz — modo
     description: "Só vale quando voice_agent ou voice_agent_url está preenchida (sem uma delas o roteador não roda). on: a plataforma decide para onde vai cada pedido (padrão quando vazio). observe: tudo vai ao assistente, mas a plataforma ainda é consultada e a decisão é contada. off: tudo vai ao assistente e a plataforma nunca é consultada."

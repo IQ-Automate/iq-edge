@@ -20,7 +20,7 @@ Nothing here is ever logged.
 The Bom dia's options (lote A5, all optional in config.yaml) become, at start, the IQ_BRIEFING_* variables briefing.py and
 schedule.py read (BRIEFING_OPTIONS); an option left empty sets nothing (the code's default). The voice router's options (lote J1b,
 0.2.5, VOICE_OPTIONS) work the same way (IQ_VOICE_AGENT, IQ_VOICE_ROUTE, and for an agent by address IQ_VOICE_AGENT_URL, _USER and
-_PASSWORD); with neither voice_agent nor voice_agent_url set the voice router does not run at all (voice_enabled)."""
+_PASSWORD; 0.2.7: IQ_VOICE_CHAT_AGENT, the agent that only chats); with neither voice_agent nor voice_agent_url set the voice router does not run at all (voice_enabled)."""
 import ipaddress
 import json
 import os
@@ -149,6 +149,7 @@ def apply_briefing_options():
 
 VOICE_OPTIONS = {
     'voice_agent': 'IQ_VOICE_AGENT',
+    'voice_chat_agent': 'IQ_VOICE_CHAT_AGENT',
     'voice_route': 'IQ_VOICE_ROUTE',
     'voice_agent_url': 'IQ_VOICE_AGENT_URL',
     'voice_agent_user': 'IQ_VOICE_AGENT_USER',
@@ -172,9 +173,9 @@ def apply_voice_options():
             continue
         if option != 'voice_agent_password':
             value = value.strip()
-        if option in ('voice_agent', 'voice_route'):
+        if option in ('voice_agent', 'voice_chat_agent', 'voice_route'):
             value = value.lower()
-        if option == 'voice_agent' and not VOICE_AGENT.fullmatch(value):
+        if option in ('voice_agent', 'voice_chat_agent') and not VOICE_AGENT.fullmatch(value):
             continue
         if option == 'voice_route' and value not in VOICE_MODES:
             continue
@@ -188,6 +189,13 @@ def apply_voice_options():
 def voice_agent():
     """The conversation entity that gets the requests that are not simple; '' = none configured."""
     value = os.getenv('IQ_VOICE_AGENT', '').strip().lower()
+    return value if VOICE_AGENT.fullmatch(value) else ''
+
+
+def voice_chat_agent():
+    """The conversation entity that gets the chat and general questions (0.2.7); '' = none configured (everything goes where it went in
+    0.2.6). It must not control the house. It never turns the router on: voice_enabled looks only at the main agent."""
+    value = os.getenv('IQ_VOICE_CHAT_AGENT', '').strip().lower()
     return value if VOICE_AGENT.fullmatch(value) else ''
 
 

@@ -1,5 +1,5 @@
 name: IQ Edge
-version: "0.2.6"
+version: "0.2.7"
 slug: iq_edge
 description: Conecta esta casa à plataforma IQ Autom8 (pareamento por código), traz o Bom dia editável na aba IQ e um roteador da voz do assistente.
 url: https://github.com/IQ-Automate/iq-edge
@@ -19,6 +19,7 @@ homeassistant_api: true
 # can play it again without asking the voice engine for it.
 map:
   - media:rw
+# 0.2.7: voice_chat_agent (optional) is a second conversation.* entity that gets only the chat and general questions; empty = as 0.2.6.
 # 0.2.5: the voice router listens here for Home Assistant Core, on the internal network (http://<hostname>:8098); null = not published on the host.
 # It only starts when voice_agent or voice_agent_url is set; with every voice option empty the add-on is what 0.2.4 was.
 ports:
@@ -46,6 +47,7 @@ schema:
   trash_recycling_days:
     - "list(monday|tuesday|wednesday|thursday|friday|saturday|sunday)?"
   voice_agent: 'match(^conversation\.[a-z0-9_]+$)?'
+  voice_chat_agent: 'match(^conversation\.[a-z0-9_]+$)?'
   voice_route: list(on|observe|off)?
   voice_agent_url: url?
   voice_agent_user: str(0,200)?

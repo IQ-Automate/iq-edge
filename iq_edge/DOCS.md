@@ -18,7 +18,8 @@ você edita.
 - Repete o último Bom dia (0.2.6) com o mesmo áudio, sem gerar a voz de novo. Veja **Repetir o último Bom dia**.
 - Roteia a voz do assistente da casa (0.2.5): recebe os pedidos do assistente de voz, pergunta à plataforma para onde cada
   um vai e manda ao assistente local do Home Assistant ou ao assistente que a casa já usava. Só liga quando você escolhe esse
-  assistente (`voice_agent_url` ou `voice_agent`). Veja **Roteador de voz**.
+  assistente (`voice_agent_url` ou `voice_agent`). Desde a 0.2.7, a conversa e as perguntas gerais podem ir a um agente só de
+  conversa (`voice_chat_agent`), sem controle da casa. Veja **Roteador de voz**.
 
 ## Instalar
 
@@ -198,12 +199,33 @@ O roteador recebe cada frase do assistente de voz da casa e pergunta à platafor
 
 - **Pedido simples** (por exemplo, acender uma luz): vai ao assistente local do Home Assistant. Se ele não entender, o pedido vai
   ao assistente.
-- **Qualquer outro pedido**: vai ao **assistente** que você escolheu (o que a casa já usava).
-- **Pedido sensível** (tranca, alarme, garagem, apagar tudo): vai sempre ao assistente. O add-on nunca troca isso.
+- **Conversa e perguntas gerais** (0.2.7): vão ao **agente de conversa** (`voice_chat_agent`), se você escolheu um. Sem ele, vão ao
+  assistente, como antes.
+- **Qualquer outro pedido** (composto, de configuração, pergunta sobre a casa que depende de histórico ou de câmeras, ou um tipo
+  que a plataforma ainda não classifica): vai ao **assistente** que você escolheu (o que a casa já usava).
+- **Pedido sensível** (tranca, alarme, garagem, apagar tudo): vai sempre ao assistente. O add-on nunca troca isso, e o agente de
+  conversa nunca o recebe.
 
 A casa nunca fica sem assistente. Sem pareamento, sem internet, com a plataforma lenta (mais de 2 segundos), com erro ou com
 resposta estranha, o pedido vai ao assistente. Sem assistente escolhido, o roteador responde em voz que não há assistente
 configurado.
+
+No resumo, **quem recebe cada pedido** (com `voice_route` em `on`):
+
+| Pedido | Destino |
+| --- | --- |
+| Simples | Home Assistant (assistente local). Se ele não entender, o assistente principal. |
+| Conversa e perguntas gerais | Agente de conversa (`voice_chat_agent`). Se ele não responder, o assistente principal. |
+| O resto, e todo pedido sensível | Assistente principal (`voice_agent_url` ou `voice_agent`). |
+
+Só o tipo "conversa", e só quando o pedido não é sensível, vai ao agente de conversa. Pedido composto, de configuração, pergunta
+sobre a casa que depende de histórico ou de câmeras e qualquer tipo que a plataforma passe a usar no futuro vão ao assistente
+principal.
+
+**Aviso:** o agente de conversa **não deve ter controle da casa**. Crie-o sem a opção de controlar o Home Assistant e sem
+entidades expostas, porque ele só deve conversar. A classificação da plataforma pode errar; o que protege a casa é esse agente não
+poder agir. O agente de conversa também não recebe quem está falando nem o aparelho: só as palavras, o idioma e o número da
+conversa.
 
 **O roteador só liga quando você escolhe um assistente**: `voice_agent_url` ou `voice_agent`. Com as opções de voz todas vazias, o
 add-on é o que era na 0.2.4: não abre a porta 8098 e não cria arquivo novo. A opção `voice_route` sozinha não liga o roteador. A aba
@@ -237,7 +259,8 @@ Todas são opcionais. Depois de mudar, reinicie o add-on. A coluna da direita di
 | `voice_agent_user` | O usuário desse endereço, se o assistente pedir. É o mesmo usuário da entrada antiga. | sem login |
 | `voice_agent_password` | A senha desse usuário. É a mesma senha da entrada antiga. | nenhuma |
 | `voice_agent` | A entidade `conversation.*` que recebe os pedidos que não são simples. Só as palavras chegam a ela. Nunca escolha o agente do próprio roteador. | nenhuma entidade |
-| `voice_route` | `on`: a plataforma decide para onde vai cada pedido. `observe`: tudo vai ao assistente, mas a plataforma ainda é consultada e a decisão é contada na aba. `off`: tudo vai ao assistente e a plataforma nunca é consultada. Só vale com `voice_agent_url` ou `voice_agent` preenchida. | `on` |
+| `voice_chat_agent` | (0.2.7) A entidade `conversation.*` que recebe só a conversa e as perguntas gerais. Só as palavras, o idioma e o número da conversa chegam a ela. **Não deve ter controle da casa.** Só vale com `voice_agent_url` ou `voice_agent` preenchida (sozinha, não liga o roteador). Se ela não responder, o pedido vai ao assistente principal. Nunca escolha o agente do próprio roteador. | nenhuma: a conversa vai ao assistente |
+| `voice_route` | `on`: a plataforma decide para onde vai cada pedido. `observe`: tudo vai ao assistente, mas a plataforma ainda é consultada e a decisão é contada na aba (inclusive quantos pedidos iriam ao agente de conversa). `off`: tudo vai ao assistente e a plataforma nunca é consultada. Só vale com `voice_agent_url` ou `voice_agent` preenchida. | `on` |
 
 O roteador recusa o endereço quando ele não é `http` nem `https`, quando tem usuário ou senha escritos dentro, ou quando aponta para
 o próprio roteador (o nome deste add-on, ou `localhost` e `127.0.0.1` na porta 8098). Nesse caso ele diz em voz que o assistente
@@ -245,7 +268,8 @@ está errado, não chama ninguém e não usa `voice_agent` no lugar. Se o assist
 responder com erro 5xx, o roteador diz em voz que não conseguiu falar com ele, e a aba conta uma falha.
 
 Para começar com segurança, use `observe`: a casa fala como antes e a aba **Assistente** mostra quantos pedidos a plataforma teria
-mandado ao assistente local. Quando os números parecerem bons, deixe o modo vazio (ou `on`).
+mandado ao assistente local e, com `voice_chat_agent` preenchida, ao agente de conversa. Quando os números parecerem bons, deixe o
+modo vazio (ou `on`).
 
 ### Casa que já usa a integração (passos do dono)
 
@@ -283,9 +307,10 @@ aparece desligada; deixe assim). O Home Assistant chega nela pelo nome do add-on
 na primeira partida do roteador e fica em `/data` (só o add-on lê).
 
 A aba **Assistente** mostra os números desde que o add-on iniciou: quantos pedidos foram ao assistente local, quantos ao assistente,
-quantos foram pelo plano B (a plataforma ou o assistente local não responderam), quantos ninguém respondeu e o tempo médio da
-consulta à plataforma. Ela mostra o tipo de assistente escolhido: a entidade, ou só as palavras "agente por endereço" (nunca o
-endereço). Nunca mostra o texto de um pedido.
+quantos ao agente de conversa, quantos o agente de conversa não respondeu (e foram ao assistente), quantos foram pelo plano B (a
+plataforma ou o assistente local não responderam), quantos ninguém respondeu e o tempo médio da consulta à plataforma. Ela mostra o
+tipo de assistente escolhido: a entidade, ou só as palavras "agente por endereço" (nunca o endereço), e o agente de conversa (ou
+"nenhum"). Nunca mostra o texto de um pedido.
 
 ## Problemas comuns
 
@@ -311,6 +336,9 @@ endereço). Nunca mostra o texto de um pedido.
   **Último problema** diz o motivo: `agent:offline` (fora do ar), `agent:timeout` (mais de 90 segundos), `agent:http_5xx` (erro do
   assistente) ou `agent:http_401` (usuário ou senha do assistente errados).
 - **"Plano B" alto na aba Assistente**: a plataforma está lenta ou fora, ou o assistente local não entendeu os pedidos simples.
+- **"Agente de conversa sem resposta" alto na aba Assistente**: o agente de conversa está fora do ar, devolveu erro, demorou mais de
+  30 segundos ou é o agente do próprio roteador. Os pedidos não se perdem: foram ao assistente principal. O **Último problema** diz
+  o motivo (`chat:offline`, `chat:http_5xx`, `chat:error_response`, `chat:itself`...).
 
 ## Contrato v2 (para a equipe técnica)
 
@@ -396,3 +424,12 @@ For a home that already uses Webhook Conversation: keep the old entry as it is; 
 to get the router's address, user and password; add a NEW entry of the integration with them (timeout 90 s); choose the new agent in
 the voice assistant. To go back, choose the old agent again. Known limit: the local path does not know the speaker's device or room,
 so a request that depends on "this room" falls back to the agent.
+
+Since 0.2.7 an optional second entity, `voice_chat_agent` (a `conversation.*` entity), gets only the chat and general questions. With
+`voice_route` on, where each request goes: simple requests go to Home Assistant's local assistant; chat and general questions go to the
+chat agent (only the words, the language and the conversation id reach it); everything else (compound, configuration, questions about
+the house that depend on history or cameras, any category the platform does not classify yet) and every sensitive request goes to the
+main agent (`voice_agent_url` or `voice_agent`). If the chat agent does not answer (down, error, over 30 s) or is the router itself,
+the request goes to the main agent and the **Assistant** tab counts it. With `observe` nothing is diverted and the tab counts how many
+requests would go to the chat agent; with `off` nothing changes. Empty (default) = as 0.2.6, and on its own it does not turn the router
+on. The chat agent must NOT be able to control the house: create it without Home Assistant control and with no exposed entities.
