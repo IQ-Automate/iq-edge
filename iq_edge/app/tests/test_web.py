@@ -360,6 +360,43 @@ class AssistantTests(WebCase):
         self.assertIn('<dt>Went to the local assistant</dt><dd>0</dd>', html)
         self.assertNotIn('Center decisions', html)
 
+    def test_the_conversation_lines_in_both_languages(self):
+        """0.2.7: who answers the general conversation (the center, or the home's chat agent) and how many conversations each answered
+        or left to the main agent, with the last reason as a code; in observe, how many would go; never a word of a request."""
+        word = 'confidencial-xpto-123'
+        self.center.route_answer = (200, {'route': 'agent', 'category': 'chat', 'sensitive': False, 'engine': 'jev'}, {})
+        self.router.handle(f'{word} oi', 'pt', 'in-1')  # the center's default for voice-chat: none / off
+        html = self.call('GET', '/assistente')[1]
+        for line in ('<dt>Conversa geral</dt><dd>pelo centro</dd>', '<dt>Conversa pelo centro</dt><dd>0</dd>',
+                     '<dt>Conversa pelo agente da casa</dt><dd>0</dd>', '<dt>Conversa sem resposta (foi ao agente principal)</dt><dd>1</dd>',
+                     '<dt>Último motivo da conversa sem resposta</dt><dd>center:off</dd>', '<dt>Foram ao assistente</dt><dd>1</dd>'):
+            self.assertIn(line, html)
+        self.center.chat_answer = (200, {'answer': 'ok', 'speech': f'{word} resposta', 'engine': 'claude', 'ms': 4}, {})
+        self.router.handle(f'{word} oi', 'pt', 'in-1')
+        html = self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1]
+        for line in ('<dt>General conversation</dt><dd>by the center</dd>', '<dt>Conversation answered by the center</dt><dd>1</dd>',
+                     "<dt>Conversation answered by the home's chat agent</dt><dd>0</dd>",
+                     '<dt>Conversation not answered (went to the main agent)</dt><dd>1</dd>',
+                     '<dt>Last reason a conversation was not answered</dt><dd>center:off</dd>'):
+            self.assertIn(line, html)
+        os.environ['IQ_VOICE_CHAT_AGENT'] = 'conversation.iq_conversa'  # the home's chat agent answers instead of the center
+        self.router.handle(f'{word} oi', 'pt', 'in-1')
+        html = self.call('GET', '/assistente')[1]
+        self.assertIn('<dt>Conversa geral</dt><dd>conversation.iq_conversa</dd>', html)
+        self.assertIn('<dt>Conversa pelo agente da casa</dt><dd>1</dd>', html)
+        self.assertIn('<dt>General conversation</dt><dd>conversation.iq_conversa</dd>', self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1])
+        os.environ['IQ_VOICE_ROUTE'] = 'observe'
+        self.router.handle(f'{word} oi', 'pt', 'in-1')
+        self.assertIn('local 0 · assistente 0 · conversa 1', self.call('GET', '/assistente')[1])
+        self.assertIn('local 0 · assistant 0 · conversation 1', self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1])
+        for page in (self.call('GET', '/assistente')[1], self.call('GET', '/assistente', headers={'Accept-Language': 'en'})[1]):
+            self.assertNotIn(word, page)  # the words are only in the history, in memory
+
+    def test_the_conversation_lines_without_a_reason_yet(self):
+        html = self.call('GET', '/assistente')[1]
+        self.assertIn('<dt>Conversa pelo centro</dt><dd>0</dd>', html)
+        self.assertNotIn('Último motivo da conversa', html)
+
     def test_an_agent_by_address_is_named_by_its_kind_never_by_its_address(self):
         os.environ.update({'IQ_VOICE_AGENT_URL': 'http://agente-secreto.local:5000/caminho-secreto?token=chave-secreta',
                            'IQ_VOICE_AGENT_USER': 'usuario-secreto', 'IQ_VOICE_AGENT_PASSWORD': 'senha-secreta'})

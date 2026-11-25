@@ -20,7 +20,7 @@ def main():
         log.info('Opções do Bom dia: %s.', ', '.join(applied))
     applied = settings.apply_voice_options()  # the voice router's (voice_agent, voice_route, voice_agent_url...) -> IQ_VOICE_*
     if applied:
-        log.info('Opções do roteador de voz: %s.', ', '.join(applied))
+        log.info('Opções do roteador de voz: %s.', ', '.join(applied))  # (only the names: voice_chat_agent is there when it is set)
     center = Center()
     briefing.usar_centro(center)  # the Bom dia's text by the center's AI (lote A5); the rule text when not paired
     scheduler = Scheduler(zone_name=lambda: center.time_zone or ha_time_zone(), preparer=Preparer())  # + the Bom dia prepared ahead
@@ -40,9 +40,10 @@ def main():
     log.info('IQ Edge %s (%s): aba na porta %s; plataforma %s; %s.', settings.VERSION, settings.arch(), settings.ingress_port(),
              settings.center_url(), 'pareado' if center.paired() else 'aguardando o código de pareamento')
     if voice_server:
-        log.info('Roteador de voz na porta %s; modo %s; %s.', settings.voice_port(), settings.voice_route_mode(),
+        chat_agent = settings.voice_chat_agent()  # 0.2.7: the entity that only chats (its id is no secret); empty = the center's Claude
+        log.info('Roteador de voz na porta %s; modo %s; %s; conversa geral %s.', settings.voice_port(), settings.voice_route_mode(),
                  {'url': 'assistente por endereço', 'refused': 'endereço do assistente recusado', 'entity': 'assistente escolhido'}[
-                     settings.voice_agent_kind()])
+                     settings.voice_agent_kind()], f'pelo agente de conversa {chat_agent}' if chat_agent else 'pelo centro')
     stopped = threading.Event()
 
     def stop(*_):

@@ -498,6 +498,7 @@ def make_handler(app):
             kind = settings.voice_agent_kind()
             agent = {'entity': settings.voice_agent(), 'url': self.t('agente por endereço', 'agent by address'),
                      'refused': self.t('agente por endereço (endereço recusado)', 'agent by address (address refused)')}.get(kind)
+            chat = settings.voice_chat_agent() or self.t('pelo centro', 'by the center')
             address = f'http://{settings.addon_hostname()}:{settings.voice_port()}{voice_http.PATH}'
             if reveal:
                 secret = (f'<input id="voice-password" value="{_e(voice_http.password())}" readonly spellcheck="false" '
@@ -511,13 +512,21 @@ def make_handler(app):
             rows = ''.join(f'<dt>{label}</dt><dd>{_e(value)}</dd>' for label, value in (
                 (self.t('Foram ao assistente local', 'Went to the local assistant'), stats['local']),
                 (self.t('Foram ao assistente', 'Went to the assistant'), stats['agent']),
+                (self.t('Conversa pelo centro', 'Conversation answered by the center'), stats['chat_center']),
+                (self.t('Conversa pelo agente da casa', "Conversation answered by the home's chat agent"), stats['chat_home']),
+                (self.t('Conversa sem resposta (foi ao agente principal)', 'Conversation not answered (went to the main agent)'),
+                 stats['chat_fallback']),
                 (self.t('Plano B (centro ou assistente local sem resposta)', 'Fallback (center or local assistant gave no answer)'), stats['fallback']),
                 (self.t('Sem resposta de ninguém', 'Nobody answered'), stats['failed']),
                 (self.t('Tempo médio da consulta ao centro', 'Average time of the center call'),
                  f'{average} ms' if average is not None else '—')))
             if mode == 'observe':
                 rows += (f'<dt>{self.t("Decisões do centro (só observadas)", "Center decisions (only observed)")}</dt><dd>'
-                         f'{self.t("local", "local")} {stats["observed_local"]} · {self.t("assistente", "assistant")} {stats["observed_agent"]}</dd>')
+                         f'{self.t("local", "local")} {stats["observed_local"]} · {self.t("assistente", "assistant")} {stats["observed_agent"]}'
+                         f' · {self.t("conversa", "conversation")} {stats["observed_chat"]}</dd>')
+            if stats['chat_reason']:
+                rows += (f'<dt>{self.t("Último motivo da conversa sem resposta", "Last reason a conversation was not answered")}</dt>'
+                         f'<dd>{_e(stats["chat_reason"])}</dd>')
             if stats['problem']:
                 rows += f'<dt>{self.t("Último problema", "Last problem")}</dt><dd>{_e(stats["problem"])}</dd>'
             body = (f'<section><h1>{self.t("Assistente de voz", "Voice assistant")}</h1><p class="muted">'
@@ -526,7 +535,8 @@ def make_handler(app):
                     f'<dt>{self.t("Usuário", "User")}</dt><dd>{_e(voice_http.USER)}</dd>'
                     f'<dt>{self.t("Senha", "Password")}</dt><dd>{secret}</dd>'
                     f'<dt>{self.t("Modo", "Mode")}</dt><dd>{_e(self.t(*MODES[mode]))}</dd>'
-                    f'<dt>{self.t("Assistente escolhido", "Chosen assistant")}</dt><dd>{_e(agent or self.t("nenhum (opções voice_agent ou voice_agent_url)", "none (options voice_agent or voice_agent_url)"))}</dd></dl></section>'
+                    f'<dt>{self.t("Assistente escolhido", "Chosen assistant")}</dt><dd>{_e(agent or self.t("nenhum (opções voice_agent ou voice_agent_url)", "none (options voice_agent or voice_agent_url)"))}</dd>'
+                    f'<dt>{self.t("Conversa geral", "General conversation")}</dt><dd>{_e(chat)}</dd></dl></section>'
                     f'<section><h2>{self.t("Desde que o add-on iniciou", "Since the add-on started")}</h2><dl>{rows}</dl>'
                     f'<p class="muted">{self.t("O texto dos pedidos nunca é guardado.", "The text of the requests is never kept.")}</p></section>')
             return self.page(self.t('Assistente', 'Assistant'), 'assistente', body)
