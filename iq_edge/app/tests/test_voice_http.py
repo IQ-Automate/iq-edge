@@ -360,6 +360,24 @@ class EndToEndTests(RealRouterCase):
         self.assertEqual(json.loads(self.ask()[2]), {'output': 'Resposta do assistente.'})
         self.assertEqual([body['agent_id'] for body in self.ha.conversations], [AGENT])
 
+    def test_a_conversation_answered_by_the_center_comes_back_in_the_integrations_shape(self):
+        """0.2.7: the center's Claude speech goes back as {"output": ...}, or in the streaming lines when the request asks for them;
+        the conversation id is the integration's own (the router only keeps the history under it, in memory)."""
+        os.environ['IQ_VOICE_AGENT'] = AGENT
+        self.center.route_answer = (200, {'route': 'agent', 'category': 'chat', 'sensitive': False, 'engine': 'jev', 'reason': 'chat'}, {})
+        self.center.chat_answer = (200, {'answer': 'ok', 'speech': 'Porque o céu espalha a luz azul.', 'engine': 'claude', 'ms': 700}, {})
+        self.assertEqual(json.loads(self.ask(query='por que o céu é azul?')[2]), {'output': 'Porque o céu espalha a luz azul.'})
+        lines = self.ask(query='e o pôr do sol?', stream=True)[2].decode('utf-8').split('\n')
+        self.assertEqual([json.loads(line) for line in lines[:-1]],
+                         [{'type': 'begin'}, {'type': 'item', 'content': 'Porque o céu espalha a luz azul.'}, {'type': 'end'}])
+        self.assertEqual(self.ha.conversations, [])  # neither the main agent nor the local assistant
+        self.assertEqual([call['body'].get('history') for call in self.center.chatted],
+                         [None, [{'role': 'user', 'text': 'por que o céu é azul?'},
+                                 {'role': 'assistant', 'text': 'Porque o céu espalha a luz azul.'}]])  # the same conversation_id: conv-1
+        self.center.chat_answer = (200, {'answer': 'none', 'reason': 'off', 'ms': 1}, {})  # not turned on: the main agent answers
+        self.assertEqual(json.loads(self.ask(query='mais uma')[2]), {'output': 'Resposta do assistente.'})
+        self.assertEqual([body['agent_id'] for body in self.ha.conversations], [AGENT])
+
     def test_no_agent_configured_is_a_spoken_sentence_not_an_http_error(self):
         os.environ.pop('IQ_VOICE_AGENT', None)
         status, _, content = self.ask(language='en')
