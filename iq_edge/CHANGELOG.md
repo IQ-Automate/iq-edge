@@ -2,26 +2,37 @@
 
 ## 0.2.7
 
-- Opção nova `voice_chat_agent` (opcional): uma segunda entidade `conversation.*` do Home Assistant, **só para conversa e perguntas
-  gerais**. Só as palavras do pedido, o idioma e o número da conversa chegam a ela (como em `voice_agent`). Vazia (padrão), tudo
-  continua como na 0.2.6.
-- Com `voice_chat_agent` preenchida e `voice_route` em `on`, o que a plataforma classifica como conversa vai a esse agente de
-  conversa. O pedido simples continua indo direto ao assistente local do Home Assistant. Todo o resto vai ao assistente
-  principal, como antes: pedido composto, de configuração, pergunta sobre a casa que depende de histórico ou de câmeras e
-  qualquer tipo que a plataforma ainda não classifica. **Pedido sensível (tranca, alarme, garagem, apagar tudo) nunca vai ao
-  agente de conversa**: vai sempre ao assistente principal.
-- A casa nunca fica sem resposta: se o agente de conversa não responder (fora do ar, erro, mais de 30 segundos) ou for o próprio
-  roteador, o pedido vai ao assistente principal na mesma hora, e a aba conta isso.
-- Modo `observe`: nada é desviado (tudo vai ao assistente principal, como antes) e a aba conta quantos pedidos **iriam** ao agente
-  de conversa. Modo `off`: nada muda, a plataforma nunca é consultada. Sem `voice_agent` nem `voice_agent_url`, o roteador continua
-  desligado: `voice_chat_agent` sozinha não liga nada.
-- Aba **Assistente**: mostra o agente de conversa escolhido (ou "nenhum") e três números novos: quantos pedidos foram ao agente de
-  conversa, quantos ele não respondeu (e foram ao assistente principal) e, no modo `observe`, quantos iriam a ele.
-- O registro da partida cita o agente de conversa quando há um (a opção e a entidade, nunca senha nem endereço). O texto dos
-  pedidos continua nunca indo ao registro, à aba nem à memória.
-- Cuidado: o agente de conversa **não deve poder controlar a casa**. Crie-o sem a opção de controlar o Home Assistant e sem
+- **Conversa e perguntas gerais** (o que a plataforma classifica como conversa, e que não é sensível) agora têm um destino próprio, em
+  vez do assistente principal. Quem responde, nesta ordem:
+  1. o **agente de conversa da casa**, se a opção nova `voice_chat_agent` (uma entidade `conversation.*` do Home Assistant) estiver
+     preenchida. Só as palavras, o idioma e o número da conversa chegam a ele (como em `voice_agent`);
+  2. com `voice_chat_agent` vazia, o **centro**: a plataforma responde com o Claude, com busca na internet. É o padrão IQ e não tem
+     opção nova: o centro decide, e responde "desligado" enquanto o dono não ligar a conversa em Ajustes do centro. **A casa não
+     recebe chave nenhuma.** O texto do pedido vai ao centro e à Anthropic e não é guardado lá;
+  3. se 1 ou 2 não responder (sem resposta, erro, tempo esgotado, "desligado", sem limite, casa não pareada, ou o agente ser o
+     próprio roteador), o pedido vai **ao assistente principal na mesma hora**, como antes, e a aba conta isso.
+- O pedido simples continua indo direto ao assistente local do Home Assistant. Todo o resto vai ao assistente principal, como antes:
+  pedido composto, de configuração, pergunta sobre a casa que depende de histórico ou de câmeras e qualquer tipo que a plataforma
+  ainda não classifica. **Pedido sensível (tranca, alarme, garagem, apagar tudo) nunca vai ao agente de conversa nem ao centro**:
+  vai sempre ao assistente principal.
+- Para o Claude entender "não, eu perguntei...", o add-on manda ao centro as últimas trocas da mesma conversa (até 3 trocas, cada
+  texto cortado em 600 caracteres). Esse histórico fica **só na memória** do add-on, por 30 minutos, por número de conversa: nunca em
+  arquivo, nunca no registro, nunca na aba. Uma troca que foi ao assistente principal não entra nele. Texto com mais de 500
+  caracteres não é enviado ao centro (vai ao assistente principal). O centro tem até 25 segundos para responder.
+- Modo `observe`: nada é desviado (tudo vai ao assistente principal) e o centro não é consultado para a conversa; a aba conta quantos
+  pedidos de conversa **iriam**. Modo `off`: nada muda, a plataforma nunca é consultada. Sem `voice_agent` nem `voice_agent_url`, o
+  roteador continua desligado: `voice_chat_agent` sozinha não liga nada.
+- Aba **Assistente**: a linha **Conversa geral** diz "pelo centro" ou a entidade do agente de conversa. Números novos: conversa pelo
+  centro, conversa pelo agente da casa, conversa sem resposta (foi ao assistente principal) com o **último motivo** em código
+  (`center:off`, `center:limit`, `center:timeout`, `home:http_500`...) e, no modo `observe`, quantas iriam.
+- O registro da partida cita o agente de conversa quando há um (a opção e a entidade, nunca senha nem endereço) e diz se a conversa
+  vai "pelo centro". O texto dos pedidos, o histórico e as respostas nunca vão ao registro, à aba nem a contador.
+- Cuidado: o agente de conversa da casa **não deve poder controlar a casa**. Crie-o sem a opção de controlar o Home Assistant e sem
   entidades expostas. A plataforma pode errar uma classificação, e o que protege a casa é o agente de conversa não ter controle.
-- **O que muda ao atualizar:** nada, enquanto `voice_chat_agent` ficar vazia.
+  (O Claude do centro também não controla nada: só devolve uma frase.)
+- **O que muda ao atualizar:** o roteador continua desligado sem `voice_agent` ou `voice_agent_url`. Com ele ligado e a conversa ainda
+  desligada nos Ajustes do centro, o pedido de conversa faz uma consulta a mais ao centro (resposta "desligado") e vai ao assistente
+  principal, como na 0.2.6; a aba mostra isso como "conversa sem resposta" com o motivo `center:off`.
 
 ## 0.2.6
 
