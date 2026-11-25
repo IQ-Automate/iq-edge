@@ -234,7 +234,9 @@ principal, como antes (a aba conta como "conversa sem resposta", motivo `center:
 - Para entender "não, eu perguntei...", o roteador manda junto as últimas trocas da mesma conversa (até 3 trocas; cada texto é
   cortado em 600 caracteres). Esse histórico fica **só na memória** do add-on, por 30 minutos, por número de conversa: nunca em
   arquivo, nunca no registro, nunca na aba. Uma troca que foi ao assistente principal não entra nele.
-- Texto com mais de 500 caracteres não é enviado ao centro. O centro tem até 25 segundos para responder (3 para conectar).
+- Texto com mais de 500 caracteres não é enviado ao centro. O pedido ao centro tem no máximo 8.000 bytes: se o histórico fizer passar
+  disso, as trocas mais antigas saem primeiro (até ficar sem histórico), e o histórico sempre começa por uma fala de quem pergunta.
+  O centro tem até 25 segundos para responder (3 para conectar).
 - Pedido sensível nunca vai ao centro. No modo `observe`, o centro não é consultado para a conversa: a aba só conta quantas
   conversas iriam.
 - O motivo da última conversa sem resposta aparece na aba **Assistente** como código: `center:off` (desligado nos Ajustes),

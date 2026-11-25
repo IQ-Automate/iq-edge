@@ -40,7 +40,7 @@ MAX_CHAT_TEXT = 500  # the request's words
 MAX_CHAT_TURN = 600  # each text of the history
 MAX_CHAT_HISTORY = 6  # items (3 exchanges), oldest first
 MAX_CHAT_SPEECH = 800
-MAX_CHAT_BODY = 8 * 1024  # bytes of the request body the center takes
+MAX_CHAT_BODY = 8000  # bytes of the request body (UTF-8, not escaped): the center answers 413 above 8 KiB
 logger = logging.getLogger('iq_edge.center')
 
 
@@ -151,16 +151,20 @@ class Center:
 
     # ---- HTTP to the center ----
 
-    def _request(self, method, route, body=None, timeout=20, credential=None, auth=True, session=None):
-        """(status, data, headers). Revoked on 401 of an authenticated call; requests' errors go up (the loop backs off)."""
+    def _request(self, method, route, body=None, timeout=20, credential=None, auth=True, session=None, raw=None):
+        """(status, data, headers). Revoked on 401 of an authenticated call; requests' errors go up (the loop backs off). `raw`: the
+        JSON body already encoded (bytes), sent as it is instead of `body` (voice-chat measures its size, so it must know the bytes)."""
         headers = {'X-IQ-Edge-Contract': CONTRACT, 'Accept': 'application/json'}
         if auth:
             data = self.credential()
             if not data:
                 raise Revoked()
             headers.update({'Authorization': 'Bearer ' + (credential or data['credential']), 'X-IQ-Edge-Home': data['home_id']})
-        answer = (session or self.session).request(method, settings.center_url() + '/api/edge/v1/' + route, json=body, headers=headers,
-                                                   timeout=timeout, allow_redirects=False)
+        if raw is not None:
+            headers['Content-Type'] = 'application/json; charset=utf-8'
+        sent = {'data': raw} if raw is not None else {'json': body}
+        answer = (session or self.session).request(method, settings.center_url() + '/api/edge/v1/' + route, headers=headers,
+                                                   timeout=timeout, allow_redirects=False, **sent)
         try:
             data = answer.json() if answer.content else None
         except ValueError:
@@ -353,13 +357,36 @@ class Center:
 
     @staticmethod
     def _chat_history(history):
-        """The history as the center takes it: [{"role": "user"|"assistant", "text": 1 to 600 characters}], the newest 6, oldest first."""
+        """The history as the center takes it: [{"role": "user"|"assistant", "text": 1 to 600 characters}], the newest 6, oldest first,
+        always starting with a `user` turn (the center drops a first turn of the assistant)."""
         items = []
         for item in history or ():
             role, text = (item.get('role'), item.get('text')) if isinstance(item, dict) else (None, None)
             if role in ('user', 'assistant') and isinstance(text, str) and text.strip():
                 items.append({'role': role, 'text': text.strip()[:MAX_CHAT_TURN]})
-        return items[-MAX_CHAT_HISTORY:]
+        items = items[-MAX_CHAT_HISTORY:]
+        while items and items[0]['role'] != 'user':
+            items.pop(0)
+        return items
+
+    @staticmethod
+    def _chat_body(text, language, history):
+        """The voice-chat request body as bytes: JSON in UTF-8 without escapes, at most MAX_CHAT_BODY bytes. When it is bigger, history
+        goes from the oldest on (what is left still starts with a `user` turn), and with none if need be: the text (500 characters at
+        most) always fits."""
+        body = {'text': text, 'language': language}
+        items = list(history)
+        while True:
+            if items:
+                body['history'] = items
+            else:
+                body.pop('history', None)
+            raw = json.dumps(body, ensure_ascii=False).encode('utf-8')
+            if len(raw) <= MAX_CHAT_BODY or not items:
+                return raw
+            items = items[1:]
+            while items and items[0]['role'] != 'user':
+                items = items[1:]
 
     def voice_chat(self, text, language, history=(), budget=None):
         """POST voice-chat (contract v2) {"text", "language", "history"} -> {"answer": "ok", "speech", "engine", "ms"} or {"answer": "none",
@@ -367,24 +394,20 @@ class Center:
         call runs in its own thread and is left behind when it is late. Anything but a 200 with `answer: ok` and a speech -> NoChat(reason):
         the router sends the request to the main agent. The words (text, history, speech) go only in the body of this call and in the
         return value: never in a log, a counter or an error. Not for text over 500 characters (the caller checks). `history` is a list of
-        {"role", "text"} (at most 6 are sent; the oldest go first when the body would pass 8 KiB)."""
+        {"role", "text"} (at most 6 are sent, starting with a `user` turn; the oldest go first when the body would pass 8,000 bytes)."""
         if not self.paired():
             raise NoChat('unpaired')
         text = str(text).strip()
         if not text or len(text) > MAX_CHAT_TEXT:
             raise NoChat('invalid')
         budget = CHAT_BUDGET if budget is None else budget
-        body = {'text': text, 'language': str(language or 'pt')[:16], 'history': self._chat_history(history)}
-        while body['history'] and len(json.dumps(body).encode('utf-8')) > MAX_CHAT_BODY:  # (what `requests` sends: non-ASCII escaped)
-            body['history'].pop(0)
-        if not body['history']:
-            del body['history']
+        body = self._chat_body(text, str(language or 'pt')[:16], self._chat_history(history))
         done = queue.Queue(maxsize=1)
         timeout = (min(CHAT_TIMEOUT[0], budget), min(CHAT_TIMEOUT[1], budget))
 
         def ask():
             try:
-                done.put(self._request('POST', 'voice-chat', body, timeout=timeout, session=self.chat_session))
+                done.put(self._request('POST', 'voice-chat', timeout=timeout, session=self.chat_session, raw=body))
             except Revoked:
                 done.put((401, None, None))
             except requests.Timeout:

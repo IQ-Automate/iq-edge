@@ -264,7 +264,7 @@ class FakeCenter(_Server):
                         pass
                     return None
                 if method == 'POST' and path == 'voice-chat':
-                    fake.chatted.append({'body': data, 'headers': dict(self.headers)})
+                    fake.chatted.append({'body': data, 'headers': dict(self.headers), 'raw': body})
                     if fake.chat_delay:
                         time.sleep(fake.chat_delay)
                     status, answer, extra = fake.chat_answer

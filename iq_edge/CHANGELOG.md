@@ -18,7 +18,9 @@
 - Para o Claude entender "não, eu perguntei...", o add-on manda ao centro as últimas trocas da mesma conversa (até 3 trocas, cada
   texto cortado em 600 caracteres). Esse histórico fica **só na memória** do add-on, por 30 minutos, por número de conversa: nunca em
   arquivo, nunca no registro, nunca na aba. Uma troca que foi ao assistente principal não entra nele. Texto com mais de 500
-  caracteres não é enviado ao centro (vai ao assistente principal). O centro tem até 25 segundos para responder.
+  caracteres não é enviado ao centro (vai ao assistente principal). O pedido ao centro tem no máximo 8.000 bytes: se o histórico
+  passar disso, saem primeiro as trocas mais antigas, e o histórico sempre começa por uma fala de quem pergunta. O centro tem até 25
+  segundos para responder.
 - Modo `observe`: nada é desviado (tudo vai ao assistente principal) e o centro não é consultado para a conversa; a aba conta quantos
   pedidos de conversa **iriam**. Modo `off`: nada muda, a plataforma nunca é consultada. Sem `voice_agent` nem `voice_agent_url`, o
   roteador continua desligado: `voice_chat_agent` sozinha não liga nada.

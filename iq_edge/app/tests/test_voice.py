@@ -563,13 +563,49 @@ class CenterVoiceChatTests(VoiceCase):
         self.edge.voice_chat(TEXT, 'pt', [{'role': 'user', 'text': f'item {index}'} for index in range(9)])
         self.assertEqual([item['text'] for item in self.center.chatted[1]['body']['history']], [f'item {index}' for index in range(3, 9)])  # the newest 6
 
-    def test_the_body_never_passes_8_kib_the_oldest_history_goes_first(self):
-        history = [{'role': 'user' if index % 2 == 0 else 'assistant', 'text': f'{index}' + '日' * 599} for index in range(6)]  # (escaped: 6 bytes each)
-        self.edge.voice_chat('a' * 500, 'zh', history)
-        sent = self.center.chatted[0]['body']
-        self.assertLessEqual(len(json.dumps(sent).encode('utf-8')), center_module.MAX_CHAT_BODY)
-        kept = [item['text'][0] for item in sent['history']]
-        self.assertTrue(kept and kept == [str(index) for index in range(6 - len(kept), 6)])  # the newest ones stayed
+    def test_the_history_always_starts_with_a_user_turn(self):
+        self.edge.voice_chat(TEXT, 'pt', [{'role': 'assistant', 'text': 'a'}, {'role': 'user', 'text': 'b'}, {'role': 'assistant', 'text': 'c'}])
+        self.assertEqual(self.center.chatted[0]['body']['history'], [{'role': 'user', 'text': 'b'}, {'role': 'assistant', 'text': 'c'}])
+        self.edge.voice_chat(TEXT, 'pt', [{'role': 'assistant', 'text': 'a'}, {'role': 'assistant', 'text': 'c'}])
+        self.assertNotIn('history', self.center.chatted[1]['body'])  # nothing left: the field is left out
+        self.edge.voice_chat(TEXT, 'pt', [{'role': 'assistant', 'text': f'a{index}'} if index % 2 else {'role': 'user', 'text': f'u{index}'}
+                                          for index in range(7)])  # (the newest 6 start with an assistant turn, which goes)
+        sent = self.center.chatted[2]['body']['history']
+        self.assertEqual([item['role'] for item in sent], ['user', 'assistant', 'user', 'assistant', 'user'])
+        self.assertEqual([item['text'] for item in sent], ['u2', 'a3', 'u4', 'a5', 'u6'])
+
+    def test_the_body_is_utf_8_without_escapes_and_never_passes_8000_bytes_the_oldest_history_goes_first(self):
+        history = [{'role': 'user' if index % 2 == 0 else 'assistant', 'text': f'{index}' + '日' * 599} for index in range(6)]  # 3 bytes each
+        self.edge.voice_chat('a' * 500, 'zh-CN', history)
+        sent = self.center.chatted[0]
+        raw = sent['raw']
+        self.assertEqual(center_module.MAX_CHAT_BODY, 8000)
+        self.assertLessEqual(len(raw), 8000)  # the very bytes that were sent
+        self.assertIn('日'.encode('utf-8'), raw)  # UTF-8, not \\u escapes (which would be 6 bytes a character)
+        self.assertNotIn(b'\\u', raw)
+        self.assertEqual(json.loads(raw), sent['body'])
+        self.assertEqual(sent['headers']['Content-Type'], 'application/json; charset=utf-8')
+        kept = [item['text'][0] for item in sent['body']['history']]
+        self.assertTrue(0 < len(kept) < 6)  # six of these do not fit: the oldest went
+        self.assertEqual(kept, [str(index) for index in range(6 - len(kept), 6)])  # and the newest ones stayed, in order
+        self.assertEqual(sent['body']['history'][0]['role'], 'user')  # (a cut that would start with the assistant goes one more)
+        self.assertEqual(sent['body']['language'], 'zh-CN')
+
+    def test_the_oldest_history_goes_first_down_to_none_when_the_body_does_not_fit(self):
+        history = [{'role': 'user' if index % 2 == 0 else 'assistant', 'text': f'{index}' + 'x' * 599} for index in range(6)]
+        with mock.patch.object(center_module, 'MAX_CHAT_BODY', 1900):  # (text 500 + about 640 bytes for each item of the history)
+            self.edge.voice_chat('a' * 500, 'pt', history)
+            sent = self.center.chatted[0]
+            self.assertLessEqual(len(sent['raw']), 1900)
+            self.assertEqual([item['text'][0] for item in sent['body']['history']], ['4', '5'])  # three would not fit; and it starts with a user turn
+            self.assertEqual([item['role'] for item in sent['body']['history']], ['user', 'assistant'])
+        with mock.patch.object(center_module, 'MAX_CHAT_BODY', 700):  # not even one item fits: no history at all, the text always does
+            self.edge.voice_chat('a' * 500, 'pt', history)
+            sent = self.center.chatted[1]
+            self.assertLessEqual(len(sent['raw']), 700)
+            self.assertEqual(sent['body'], {'text': 'a' * 500, 'language': 'pt'})
+        self.edge.voice_chat('a' * 500, 'pt', history)  # and with the real limit all six go
+        self.assertEqual(len(self.center.chatted[2]['body']['history']), 6)
 
     def test_the_speech_is_cut_at_800_characters(self):
         self.center.chat_answer = (200, {'answer': 'ok', 'speech': '  ' + 'a' * 900 + '  ', 'engine': 'claude'}, {})
