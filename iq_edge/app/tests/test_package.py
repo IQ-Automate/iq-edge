@@ -93,7 +93,7 @@ class PackageTests(unittest.TestCase):
         changelog = (ADDON / 'CHANGELOG.md').read_text(encoding='utf-8')
         entry = changelog[changelog.index('## 0.2.5'):changelog.index('## 0.2.4')]
         self.assertEqual(changelog.count('## 0.2.5'), 1)
-        self.assertEqual(re.findall(r'^## (\d+\.\d+\.\d+)$', changelog, re.M)[:2], ['0.2.6', '0.2.5'])  # 0.2.6 (the repeat) sits on top of it
+        self.assertEqual(re.findall(r'^## (\d+\.\d+\.\d+)$', changelog, re.M)[:3], ['0.2.7', '0.2.6', '0.2.5'])  # 0.2.7 (the chat agent) sits on top of them
         for option in ('voice_agent', 'voice_route', *env):
             self.assertIn(f'`{option}`', docs, option)
             self.assertIn(f'`{option}`', entry, option)
@@ -102,6 +102,30 @@ class PackageTests(unittest.TestCase):
                      'Mostrar a senha', 'entrada **nova**', 'Assistentes de voz', 'escolha de novo o agente antigo', 'depende de "este cômodo"'):
             self.assertIn(text, steps, text)  # the owner's steps, and the known limit of the local path
         self.assertIn('o roteador está desligado', ' '.join(docs.split()))
+
+    def test_the_chat_agent_option(self):
+        """0.2.7: voice_chat_agent is optional (out of `options`), takes exactly what voice_agent takes, is read from IQ_VOICE_CHAT_AGENT,
+        has a name and a description in both languages that say it must not control the house, and is in the docs and the changelog."""
+        config = yaml.safe_load((ADDON / 'config.yaml').read_text(encoding='utf-8'))
+        self.assertEqual(config['version'], '0.2.7')
+        self.assertEqual(iq_edge.__version__, '0.2.7')
+        self.assertEqual(config['schema']['voice_chat_agent'], config['schema']['voice_agent'])  # the same shape: conversation.<name>?
+        self.assertNotIn('voice_chat_agent', config['options'])
+        self.assertEqual(settings.VOICE_OPTIONS['voice_chat_agent'], 'IQ_VOICE_CHAT_AGENT')
+        chat = re.fullmatch(r'match\((.*)\)\?', config['schema']['voice_chat_agent']).group(1)
+        self.assertTrue(re.match(chat, 'conversation.iq_conversa'))
+        for wrong in ('light.sala', 'conversation.', 'conversation.A', 'conversation.a b', 'xconversation.a', 'Conversation.a'):
+            self.assertIsNone(re.match(chat, wrong), wrong)  # an invalid value is refused by the schema
+        for name, control in (('en', 'control the house'), ('pt-BR', 'controlar a casa')):
+            translations = yaml.safe_load((ADDON / 'translations' / f'{name}.yaml').read_text(encoding='utf-8'))['configuration']
+            self.assertTrue(translations['voice_chat_agent']['name'], name)
+            self.assertIn(control, translations['voice_chat_agent']['description'], name)
+        docs = (ADDON / 'DOCS.md').read_text(encoding='utf-8')
+        changelog = (ADDON / 'CHANGELOG.md').read_text(encoding='utf-8')
+        self.assertIn('`voice_chat_agent`', docs)
+        self.assertIn('não deve ter controle da casa', docs)
+        self.assertIn('Conversa e perguntas gerais', docs)
+        self.assertIn('`voice_chat_agent`', changelog[changelog.index('## 0.2.7'):changelog.index('## 0.2.6')])
 
     def test_dockerfile_and_repository(self):
         dockerfile = (ADDON / 'Dockerfile').read_text(encoding='utf-8')

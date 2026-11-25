@@ -3,12 +3,14 @@ long-poll for jobs (HTTPS going OUT of the home; nothing comes in), running each
 rotation every 30 days, unpairing, the client's Bom dia sent to the center and the Bom dia's text written by the center's AI
 (briefing-compose, lote A5: only data goes, the key and the prompt stay in the center). Since 0.2.5 (lote J1b) the voice router asks
 voice-route where a spoken request must go (local assistant or the home's agent): one try, about 2 s in all, any failure = NoRoute.
+Since 0.2.7 a general conversation can be answered by the center's Claude (voice-chat): one try, 25 s at most, any failure = NoChat.
 
 The credential (32 random bytes from the center, delivered once) lives only in /data/edge.json (mode 600) and in the Authorization
 header of each call; never in a log, the tab or an answer. A code the center refused is never sent again by itself (it would spend
 the code's 5 attempts): a new code (options or the tab) is needed. After pairing, the code is cleared from the options (Supervisor
 API /addons/self/options). Errors back off 1 → 60 s; 401 = the owner (or the tab) unpaired it: the credential is forgotten."""
 import hashlib
+import json
 import logging
 import queue
 import socket
@@ -30,7 +32,15 @@ COMPOSE_TIMEOUT = 45
 COMPOSE_ERRORS = {401: 'revoked', 410: 'home_deleted', 413: 'too_big', 422: 'invalid', 429: 'rate', 502: 'ai_failed', 503: 'no_key'}
 ROUTE_BUDGET = 2.0  # seconds, the whole voice-route call (connect + answer): the person is waiting for the house to answer
 ROUTE_ERRORS = {401: 'revoked', 410: 'home_deleted', 413: 'too_big', 422: 'invalid', 429: 'rate'}
-ROUTE_CATEGORIES = ('simple', 'compound', 'config', 'chat', 'unknown')
+ROUTE_CATEGORIES = ('simple', 'compound', 'config', 'chat', 'house', 'unknown')  # a category not listed here is read as 'unknown'
+CHAT_TIMEOUT = (3.0, 22.0)  # voice-chat: seconds to connect, seconds to wait for the answer (the center's Claude may take a while)
+CHAT_BUDGET = 25.0  # seconds, the whole voice-chat call
+CHAT_REASONS = ('off', 'no_key', 'limit', 'timeout', 'error', 'empty')  # why the center did not answer (`answer: none`); the rest is read as bad_response
+MAX_CHAT_TEXT = 500  # the request's words
+MAX_CHAT_TURN = 600  # each text of the history
+MAX_CHAT_HISTORY = 6  # items (3 exchanges), oldest first
+MAX_CHAT_SPEECH = 800
+MAX_CHAT_BODY = 8000  # bytes of the request body (UTF-8, not escaped): the center answers 413 above 8 KiB
 logger = logging.getLogger('iq_edge.center')
 
 
@@ -56,6 +66,15 @@ class NoAI(Exception):
 class NoRoute(Exception):
     """The center did not say where a spoken request goes (not paired, offline, slow, refused, a malformed answer...): the router
     sends it to the home's agent. `reason` is a short code, never data."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+class NoChat(Exception):
+    """The center did not answer a general conversation (not paired, offline, slow, off, no key, limit, a malformed answer...): the router
+    sends the request to the main agent. `reason` is a short code, never data."""
 
     def __init__(self, reason):
         self.reason = reason
@@ -91,6 +110,8 @@ class Center:
         self.ai = {'ok': None, 'at': None, 'reason': ''}  # the last briefing-compose (the tab shows it)
         self.route_session = requests.Session()  # voice-route: its own, called from the voice router's threads
         self.route_session.trust_env = False
+        self.chat_session = requests.Session()  # voice-chat: its own too (a slow answer must not hold the others)
+        self.chat_session.trust_env = False
         self._local = threading.local()  # a preview job's deadline (the center gives up on it after that)
 
     # ---- the credential file ----
@@ -130,16 +151,20 @@ class Center:
 
     # ---- HTTP to the center ----
 
-    def _request(self, method, route, body=None, timeout=20, credential=None, auth=True, session=None):
-        """(status, data, headers). Revoked on 401 of an authenticated call; requests' errors go up (the loop backs off)."""
+    def _request(self, method, route, body=None, timeout=20, credential=None, auth=True, session=None, raw=None):
+        """(status, data, headers). Revoked on 401 of an authenticated call; requests' errors go up (the loop backs off). `raw`: the
+        JSON body already encoded (bytes), sent as it is instead of `body` (voice-chat measures its size, so it must know the bytes)."""
         headers = {'X-IQ-Edge-Contract': CONTRACT, 'Accept': 'application/json'}
         if auth:
             data = self.credential()
             if not data:
                 raise Revoked()
             headers.update({'Authorization': 'Bearer ' + (credential or data['credential']), 'X-IQ-Edge-Home': data['home_id']})
-        answer = (session or self.session).request(method, settings.center_url() + '/api/edge/v1/' + route, json=body, headers=headers,
-                                                   timeout=timeout, allow_redirects=False)
+        if raw is not None:
+            headers['Content-Type'] = 'application/json; charset=utf-8'
+        sent = {'data': raw} if raw is not None else {'json': body}
+        answer = (session or self.session).request(method, settings.center_url() + '/api/edge/v1/' + route, headers=headers,
+                                                   timeout=timeout, allow_redirects=False, **sent)
         try:
             data = answer.json() if answer.content else None
         except ValueError:
@@ -327,6 +352,86 @@ class Center:
         engine = data.get('engine') if data.get('engine') in ('jev', 'simulated', 'none') else 'none'
         return {'route': 'agent' if sensitive else route, 'category': category, 'sensitive': sensitive, 'engine': engine,
                 'reason': str(data.get('reason') or '')[:40]}
+
+    # ---- a general conversation answered by the center's Claude (voice-chat, 0.2.7) ----
+
+    @staticmethod
+    def _chat_history(history):
+        """The history as the center takes it: [{"role": "user"|"assistant", "text": 1 to 600 characters}], the newest 6, oldest first,
+        always starting with a `user` turn (the center drops a first turn of the assistant)."""
+        items = []
+        for item in history or ():
+            role, text = (item.get('role'), item.get('text')) if isinstance(item, dict) else (None, None)
+            if role in ('user', 'assistant') and isinstance(text, str) and text.strip():
+                items.append({'role': role, 'text': text.strip()[:MAX_CHAT_TURN]})
+        items = items[-MAX_CHAT_HISTORY:]
+        while items and items[0]['role'] != 'user':
+            items.pop(0)
+        return items
+
+    @staticmethod
+    def _chat_body(text, language, history):
+        """The voice-chat request body as bytes: JSON in UTF-8 without escapes, at most MAX_CHAT_BODY bytes. When it is bigger, history
+        goes from the oldest on (what is left still starts with a `user` turn), and with none if need be: the text (500 characters at
+        most) always fits."""
+        body = {'text': text, 'language': language}
+        items = list(history)
+        while True:
+            if items:
+                body['history'] = items
+            else:
+                body.pop('history', None)
+            raw = json.dumps(body, ensure_ascii=False).encode('utf-8')
+            if len(raw) <= MAX_CHAT_BODY or not items:
+                return raw
+            items = items[1:]
+            while items and items[0]['role'] != 'user':
+                items = items[1:]
+
+    def voice_chat(self, text, language, history=(), budget=None):
+        """POST voice-chat (contract v2) {"text", "language", "history"} -> {"answer": "ok", "speech", "engine", "ms"} or {"answer": "none",
+        "reason", "ms"}. Returns the speech (a str, 1 to 800 characters). One try and `budget` seconds in all (the person is waiting): the
+        call runs in its own thread and is left behind when it is late. Anything but a 200 with `answer: ok` and a speech -> NoChat(reason):
+        the router sends the request to the main agent. The words (text, history, speech) go only in the body of this call and in the
+        return value: never in a log, a counter or an error. Not for text over 500 characters (the caller checks). `history` is a list of
+        {"role", "text"} (at most 6 are sent, starting with a `user` turn; the oldest go first when the body would pass 8,000 bytes)."""
+        if not self.paired():
+            raise NoChat('unpaired')
+        text = str(text).strip()
+        if not text or len(text) > MAX_CHAT_TEXT:
+            raise NoChat('invalid')
+        budget = CHAT_BUDGET if budget is None else budget
+        body = self._chat_body(text, str(language or 'pt')[:16], self._chat_history(history))
+        done = queue.Queue(maxsize=1)
+        timeout = (min(CHAT_TIMEOUT[0], budget), min(CHAT_TIMEOUT[1], budget))
+
+        def ask():
+            try:
+                done.put(self._request('POST', 'voice-chat', timeout=timeout, session=self.chat_session, raw=body))
+            except Revoked:
+                done.put((401, None, None))
+            except requests.Timeout:
+                done.put(('timeout', None, None))
+            except Exception:  # offline, and anything unexpected: the request still goes to the main agent
+                done.put(('offline', None, None))
+        threading.Thread(target=ask, name='iq-edge-chat', daemon=True).start()
+        try:
+            status, data, _ = done.get(timeout=budget)
+        except queue.Empty:
+            raise NoChat('timeout') from None
+        if status != 200:
+            raise NoChat(status if isinstance(status, str) else ROUTE_ERRORS.get(status, f'http_{status}'))
+        if not isinstance(data, dict):
+            raise NoChat('bad_response')
+        if data.get('answer') == 'ok':
+            speech = data.get('speech')
+            if isinstance(speech, str) and speech.strip():
+                return speech.strip()[:MAX_CHAT_SPEECH]
+            raise NoChat('empty')
+        if data.get('answer') == 'none':
+            reason = data.get('reason')
+            raise NoChat(reason if reason in CHAT_REASONS else 'bad_response')
+        raise NoChat('bad_response')
 
     # ---- heartbeat, rotation, the client's Bom dia, unpair ----
 

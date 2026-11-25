@@ -50,6 +50,9 @@ configuration:
   voice_agent:
     name: Voice router — assistant by entity
     description: The conversation.* entity of Home Assistant that gets the requests that are not simple. Only the words of the request reach it. It does not know who is speaking or from which device. For an assistant that the integration Webhook Conversation uses today, fill in voice_agent_url instead. Never choose the router's own agent. Empty (default) = not used.
+  voice_chat_agent:
+    name: Voice router — chat assistant
+    description: The conversation.* entity of Home Assistant that gets only the chat and general questions, instead of the IQ center's Claude. Only the words of the request reach it. It should NOT be able to control the house (turn off Control Home Assistant in it and expose no entities to it). Works only when voice_agent or voice_agent_url is filled in. If it does not answer, the request goes to the main assistant. Never choose the router's own agent. Empty (default) = the IQ center answers the chat (when the owner turns it on in the center), and if it does not, the main assistant does.
   voice_route:
     name: Voice router — mode
     description: "Works only when voice_agent or voice_agent_url is filled in (the router does not run without one). on: the platform decides where each request goes (default when empty). observe: everything goes to the assistant, but the platform is still asked and its decision is counted. off: everything goes to the assistant and the platform is never asked."

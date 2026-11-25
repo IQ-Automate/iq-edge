@@ -172,6 +172,10 @@ class FakeCenter(_Server):
         self.route_answer = (200, {'route': 'agent', 'category': 'unknown', 'sensitive': False, 'confidence': None, 'engine': 'none',
                                    'reason': 'test', 'ms': 3}, {})
         self.routed, self.route_delay = [], 0
+        # voice-chat (0.2.7): the general conversation answered by the center's Claude; the real center answers `none / off` until the
+        # owner turns it on (the default here too); `chat_delay` seconds before answering; every call kept with its headers
+        self.chat_answer = (200, {'answer': 'none', 'reason': 'off', 'ms': 3}, {})
+        self.chatted, self.chat_delay = [], 0
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -247,6 +251,23 @@ class FakeCenter(_Server):
                     if fake.route_delay:
                         time.sleep(fake.route_delay)
                     status, answer, extra = fake.route_answer
+                    raw = answer if isinstance(answer, bytes) else json.dumps(answer).encode()
+                    try:  # a slow answer: the add-on may have given up and closed the connection already
+                        self.send_response(status)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(raw)))
+                        for name, value in extra.items():
+                            self.send_header(name, value)
+                        self.end_headers()
+                        self.wfile.write(raw)
+                    except OSError:
+                        pass
+                    return None
+                if method == 'POST' and path == 'voice-chat':
+                    fake.chatted.append({'body': data, 'headers': dict(self.headers), 'raw': body})
+                    if fake.chat_delay:
+                        time.sleep(fake.chat_delay)
+                    status, answer, extra = fake.chat_answer
                     raw = answer if isinstance(answer, bytes) else json.dumps(answer).encode()
                     try:  # a slow answer: the add-on may have given up and closed the connection already
                         self.send_response(status)

@@ -102,8 +102,31 @@ class MainTests(EdgeCase):
         self.assertIn('assistente escolhido', logged)
         self.assertNotIn(password, logged)
         self.assertNotIn('conversation.iq_assistant', logged)
+        self.assertIn('conversa geral pelo centro', logged)  # 0.2.7: no chat agent set: the center's Claude answers the conversation
+        self.assertIn('<dt>Conversa geral</dt><dd>pelo centro</dd>', page)
         self.stop()
         self.assertFalse(self.thread.is_alive())
+
+    def test_the_log_names_the_chat_agent_when_there_is_one_and_never_a_secret(self):
+        """0.2.7: the start lines cite voice_chat_agent (the option name, then the entity id: no secret) and the tab shows it."""
+        settings.write_json(settings.data_dir() / 'options.json', {
+            'center_url': self.center.url, 'voice_agent_url': 'http://agente-secreto.local:5000/caminho-secreto', 'voice_agent_user': 'usuario-secreto',
+            'voice_agent_password': 'senha-secreta', 'voice_chat_agent': 'conversation.iq_conversa'}, private=False)
+        port = free_port()
+        self.start(port)
+        self.assertTrue(self.wait_for(port))
+        logged = '\n'.join(self.records.lines)
+        self.assertIn('Opções do roteador de voz: voice_chat_agent, voice_agent_url, voice_agent_user, voice_agent_password.', logged)
+        self.assertIn('conversa geral pelo agente de conversa conversation.iq_conversa.', logged)
+        for secret in ('agente-secreto', 'caminho-secreto', 'usuario-secreto', 'senha-secreta', voice_http.password()):
+            self.assertNotIn(secret, logged)
+        self.assertIn('<dt>Conversa geral</dt><dd>conversation.iq_conversa</dd>', self.page('/assistente')[1])
+
+    def test_a_chat_agent_alone_does_not_turn_the_router_on(self):
+        self.options(voice_chat_agent='conversation.iq_conversa')
+        port = free_port()
+        self.start(port)
+        self.assertNoDoor(port)
 
     def options(self, **values):
         settings.write_json(settings.data_dir() / 'options.json', dict({'center_url': self.center.url}, **values), private=False)
